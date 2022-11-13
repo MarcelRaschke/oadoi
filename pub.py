@@ -3,47 +3,46 @@ import json
 import random
 import re
 from collections import Counter
-from collections import defaultdict
 from collections import OrderedDict
-from dateutil.relativedelta import relativedelta
-from threading import Thread
-from time import time
-
-import requests
+from collections import defaultdict
 from enum import Enum
+from threading import Thread
+
+import boto3
+import dateutil.parser
+import gzip
+import requests
+import urllib.parse
+from dateutil.relativedelta import relativedelta
 from lxml import etree
-from sqlalchemy import orm, sql
+from sqlalchemy import orm, sql, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm.attributes import flag_modified
 
-import dateutil.parser
-import endpoint
-import pmh_record
 import oa_evidence
 import oa_local
 import oa_manual
 import oa_page
 import page
-from abstract import Abstract
 from app import db
 from app import logger
 from http_cache import get_session_id
 from journal import Journal
-from oa_pmc import query_pmc
 from open_location import OpenLocation, validate_pdf_urls, OAStatus, oa_status_sort_key
 from pdf_url import PdfUrl
-from pmh_record import PmhRecord
 from pmh_record import is_known_mismatch
 from pmh_record import title_is_too_common
 from pmh_record import title_is_too_short
+from recordthresher.record_maker import CrossrefRecordMaker
 from reported_noncompliant_copies import reported_noncompliant_url_fragments
 from util import NoDoiException
-from util import is_pmc, clamp, clean_doi, normalize_doi
-from util import elapsed
+from util import is_pmc, clamp, clean_doi, fix_url_scheme, normalize_doi
 from util import normalize
 from util import normalize_title
 from util import safe_commit
 from webpage import PublisherWebpage
+
+s2_endpoint_id = 'trmgzrn8eq4yx7ddvmzs'
 
 
 def build_new_pub(doi, crossref_api):
@@ -59,11 +58,11 @@ def add_new_pubs(pubs_to_commit):
 
     pubs_indexed_by_id = dict((my_pub.id, my_pub) for my_pub in pubs_to_commit)
     ids_already_in_db = [
-        id_tuple[0] for id_tuple in db.session.query(Pub.id).filter(Pub.id.in_(pubs_indexed_by_id.keys())).all()
+        id_tuple[0] for id_tuple in db.session.query(Pub.id).filter(Pub.id.in_(list(pubs_indexed_by_id.keys()))).all()
     ]
     pubs_to_add_to_db = []
 
-    for (pub_id, my_pub) in pubs_indexed_by_id.iteritems():
+    for (pub_id, my_pub) in pubs_indexed_by_id.items():
         if pub_id in ids_already_in_db:
             # merge if we need to
             pass
@@ -72,8 +71,19 @@ def add_new_pubs(pubs_to_commit):
             # logger.info(u"adding new pub {}".format(my_pub.id))
 
     if pubs_to_add_to_db:
-        logger.info(u"adding {} pubs".format(len(pubs_to_add_to_db)))
+        logger.info("adding {} pubs".format(len(pubs_to_add_to_db)))
         db.session.add_all(pubs_to_add_to_db)
+        safe_commit(db)
+        db.session.execute(
+            text(
+                '''
+                insert into recordthresher.doi_record_queue (doi, updated) (
+                    select id, (crossref_api_raw_new->'indexed'->>'date-time')::timestamp without time zone from pub
+                    where id = any (:dois)
+                ) on conflict do nothing
+                '''
+            ).bindparams(dois=[p.id for p in pubs_to_add_to_db])
+        )
         safe_commit(db)
     return pubs_to_add_to_db
 
@@ -94,7 +104,7 @@ def call_targets_in_parallel(targets):
         except (KeyboardInterrupt, SystemExit):
             pass
         except Exception as e:
-            logger.exception(u"thread Exception {} in call_targets_in_parallel. continuing.".format(e))
+            logger.exception("thread Exception {} in call_targets_in_parallel. continuing.".format(e))
     # logger.info(u"finished the calls to {}".format(targets))
 
 
@@ -111,7 +121,7 @@ def call_args_in_parallel(target, args_list):
         except (KeyboardInterrupt, SystemExit):
             pass
         except Exception as e:
-            logger.exception(u"thread Exception {} in call_args_in_parallel. continuing.".format(e))
+            logger.exception("thread Exception {} in call_args_in_parallel. continuing.".format(e))
     # logger.info(u"finished the calls to {}".format(targets))
 
 
@@ -196,7 +206,7 @@ def max_pages_from_one_repo(endpoint_ids):
     most_common = endpoint_id_counter.most_common(1)
     if most_common:
         return most_common[0][1]
-    return None
+    return 0
 
 
 def get_citeproc_date(year=0, month=1, day=1):
@@ -264,17 +274,17 @@ def build_crossref_record(data):
             record[field.lower()] = data[field]
 
     if "title" in data:
-        if isinstance(data["title"], basestring):
+        if isinstance(data["title"], str):
             record["title"] = data["title"]
         else:
             if data["title"]:
                 record["title"] = data["title"][0]  # first one
         if "title" in record and record["title"]:
-            record["title"] = re.sub(u"\s+", u" ", record["title"])
+            record["title"] = re.sub("\s+", " ", record["title"])
 
     if "container-title" in data:
         record["all_journals"] = data["container-title"]
-        if isinstance(data["container-title"], basestring):
+        if isinstance(data["container-title"], str):
             record["journal"] = data["container-title"]
         else:
             if data["container-title"]:
@@ -288,7 +298,7 @@ def build_crossref_record(data):
         record["all_authors"] = data["author"]
         if data["author"]:
             first_author = data["author"][0]
-            if first_author and u"family" in first_author:
+            if first_author and "family" in first_author:
                 record["first_author_lastname"] = first_author["family"]
             for author in record["all_authors"]:
                 if author and "affiliation" in author and not author.get("affiliation", None):
@@ -331,7 +341,6 @@ class PmcidLookup(db.Model):
         'PmcidPublishedVersionLookup',
         lazy='subquery',
         viewonly=True,
-        cascade="all, delete-orphan",
         backref=db.backref("pmcid_lookup", lazy="subquery"),
         foreign_keys="PmcidPublishedVersionLookup.pmcid"
     )
@@ -342,11 +351,13 @@ class PmcidLookup(db.Model):
             return "publishedVersion"
         return "acceptedVersion"
 
+
 class IssnlLookup(db.Model):
-    __tablename__ = 'issn_to_issnl'
+    __tablename__ = 'openalex_issn_to_issnl'
 
     issn = db.Column(db.Text, primary_key=True)
     issn_l = db.Column(db.Text)
+    journal_id = db.Column(db.Text)
 
 
 class JournalOaStartYear(db.Model):
@@ -376,7 +387,36 @@ class Preprint(db.Model):
     postprint_id = db.Column(db.Text, primary_key=True)
 
     def __repr__(self):
-        return u'<Preprint {}, {}>'.format(self.preprint_id, self.postprint_id)
+        return '<Preprint {}, {}>'.format(self.preprint_id, self.postprint_id)
+
+
+class Retraction(db.Model):
+    retraction_doi = db.Column(db.Text, primary_key=True)
+    retracted_doi = db.Column(db.Text, primary_key=True)
+
+    def __repr__(self):
+        return '<Retraction {}, {}>'.format(self.retraction_doi, self.retracted_doi)
+
+
+class FilteredPreprint(db.Model):
+    preprint_id = db.Column(db.Text, primary_key=True)
+    postprint_id = db.Column(db.Text, primary_key=True)
+
+    def __repr__(self):
+        return '<FilteredPreprint {}, {}>'.format(self.preprint_id, self.postprint_id)
+
+
+class PubRefreshResult(db.Model):
+    id = db.Column(db.Text, primary_key=True)
+    refresh_time = db.Column(db.DateTime, primary_key=True)
+    oa_status_before = db.Column(db.Text)
+    oa_status_after = db.Column(db.Text)
+
+    def __repr__(self):
+        return f'<PubRefreshResult({self.id}, {self.refresh_time}, {self.oa_status_before}, {self.oa_status_after})>'
+
+
+LANDING_PAGE_ARCHIVE_BUCKET = 'unpaywall-doi-landing-page'
 
 
 class Pub(db.Model):
@@ -404,25 +444,18 @@ class Pub(db.Model):
     scrape_license = db.Column(db.Text)
 
     resolved_doi_url = db.Column(db.Text)
+    resolved_doi_http_status = db.Column(db.SmallInteger)
+    doi_landing_page_is_archived = db.Column(db.Boolean)
+    recordthresher_id = db.Column(db.Text)
 
     error = db.Column(db.Text)
 
     rand = db.Column(db.Numeric)
 
-    # abstracts = db.relationship(
-    #     'Abstract',
-    #     lazy='subquery',
-    #     viewonly=True,
-    #     cascade="all, delete-orphan",
-    #     backref=db.backref("pub", lazy="subquery"),
-    #     foreign_keys="Abstract.doi"
-    # )
-
     pmcid_links = db.relationship(
         'PmcidLookup',
         lazy='subquery',
         viewonly=True,
-        cascade="all, delete-orphan",
         backref=db.backref("pub", lazy="subquery"),
         foreign_keys="PmcidLookup.doi"
     )
@@ -430,31 +463,23 @@ class Pub(db.Model):
     page_matches_by_doi = db.relationship(
         'Page',
         lazy='subquery',
-        cascade="all, delete-orphan",
         viewonly=True,
-        enable_typechecks=False,
         backref=db.backref("pub_by_doi", lazy="subquery"),
         foreign_keys="Page.doi"
     )
 
-    page_new_matches_by_doi = db.relationship(
-        'PageDoiMatch',
+    repo_page_matches_by_doi = db.relationship(
+        'RepoPage',
         lazy='subquery',
-        cascade="",
         viewonly=True,
-        enable_typechecks=False,
-        backref=db.backref("pub", lazy="subquery"),
-        foreign_keys="PageDoiMatch.doi"
+        primaryjoin="and_(RepoPage.match_doi == True, RepoPage.doi == Pub.id)"
     )
 
-    page_new_matches_by_title = db.relationship(
-        'PageTitleMatch',
+    repo_page_matches_by_title = db.relationship(
+        'RepoPage',
         lazy='subquery',
-        cascade="",
         viewonly=True,
-        enable_typechecks=False,
-        backref=db.backref("pub", lazy="subquery"),
-        foreign_keys="PageTitleMatch.normalized_title"
+        primaryjoin="and_(RepoPage.match_title == True, RepoPage.normalized_title == Pub.normalized_title)"
     )
 
     def __init__(self, **biblio):
@@ -471,8 +496,9 @@ class Pub(db.Model):
         self.session_id = None
         self.version = None
         self.issn_l = None
+        self.openalex_journal_id = None
         # self.updated = datetime.datetime.utcnow()
-        for (k, v) in biblio.iteritems():
+        for (k, v) in biblio.items():
             self.__setattr__(k, v)
 
     @orm.reconstructor
@@ -493,7 +519,10 @@ class Pub(db.Model):
         self.closed_urls = []
         self.session_id = None
         self.version = None
-        self.issn_l = self.lookup_issn_l()
+
+        issn_l_lookup = self.lookup_issn_l()
+        self.issn_l = issn_l_lookup.issn_l if issn_l_lookup else None
+        self.openalex_journal_id = issn_l_lookup.journal_id if issn_l_lookup else None
 
     @property
     def doi(self):
@@ -501,7 +530,7 @@ class Pub(db.Model):
 
     @property
     def unpaywall_api_url(self):
-        return u"https://api.unpaywall.org/v2/{}?email=internal@impactstory.org".format(self.id)
+        return "https://api.unpaywall.org/v2/{}?email=internal@impactstory.org".format(self.id)
 
     @property
     def tdm_api(self):
@@ -530,7 +559,7 @@ class Pub(db.Model):
         if self.crossref_api_raw:
             try:
                 record = build_crossref_record(self.crossref_api_raw)
-                print "got record"
+                print("got record")
                 return record
             except IndexError:
                 pass
@@ -548,7 +577,11 @@ class Pub(db.Model):
 
     @property
     def url(self):
-        return u"https://doi.org/{}".format(self.id)
+        if self.doi and self.doi.startswith('10.2218/forum.'):
+            article_id = self.doi.split('.')[-1]
+            return f'http://journals.ed.ac.uk/forum/article/view/{article_id}';
+
+        return "https://doi.org/{}".format(self.id)
 
     @property
     def is_oa(self):
@@ -557,22 +590,22 @@ class Pub(db.Model):
     @property
     def is_paratext(self):
         paratext_exprs = [
-            ur'^Author Index$'
-            ur'^Back Cover',
-            ur'^Contents$',
-            ur'^Contents:',
-            ur'^Cover Image',
-            ur'^Cover Picture',
-            ur'^Editorial Board',
-            ur'^Front Cover',
-            ur'^Frontispiece',
-            ur'^Inside Back Cover',
-            ur'^Inside Cover',
-            ur'^Inside Front Cover',
-            ur'^Issue Information',
-            ur'^List of contents',
-            ur'^Masthead',
-            ur'^Title page',
+            r'^Author Index$'
+            r'^Back Cover',
+            r'^Contents$',
+            r'^Contents:',
+            r'^Cover Image',
+            r'^Cover Picture',
+            r'^Editorial Board',
+            r'^Front Cover',
+            r'^Frontispiece',
+            r'^Inside Back Cover',
+            r'^Inside Cover',
+            r'^Inside Front Cover',
+            r'^Issue Information',
+            r'^List of contents',
+            r'^Masthead',
+            r'^Title page',
         ]
 
         for expr in paratext_exprs:
@@ -580,6 +613,12 @@ class Pub(db.Model):
                 return True
 
         return False
+
+    @property
+    def is_retracted(self):
+        return bool(
+            Retraction.query.filter(Retraction.retracted_doi == self.doi).all()
+        )
 
     def recalculate(self, quiet=False, ask_preprint=True):
         self.clear_locations()
@@ -597,7 +636,7 @@ class Pub(db.Model):
         self.set_license_hacks()
 
         if self.is_oa and not quiet:
-            logger.info(u"**REFRESH found a fulltext_url for {}!  {}: {} **".format(
+            logger.info("**REFRESH found a fulltext_url for {}!  {}: {} **".format(
                 self.id, self.oa_status.value, self.fulltext_url))
 
     def refresh_crossref(self):
@@ -610,17 +649,31 @@ class Pub(db.Model):
 
     def refresh(self, session_id=None):
         self.session_id = session_id or get_session_id()
+        refresh_result = PubRefreshResult(
+            id=self.id,
+            refresh_time=datetime.datetime.utcnow(),
+            oa_status_before=self.response_jsonb and self.response_jsonb.get('oa_status', None)
+        )
 
         # self.refresh_green_locations()
 
         self.refresh_hybrid_scrape()
 
-        # and then recalcualte everything, so can do to_dict() after this and it all works
+        # and then recalculate everything, so can do to_dict() after this and it all works
         self.update()
+
+        refresh_result.oa_status_after = self.response_jsonb and self.response_jsonb.get('oa_status', None)
+        db.session.merge(refresh_result)
 
         # then do this so the recalculated stuff saves
         # it's ok if this takes a long time... is a short time compared to refresh_hybrid_scrape
+        self.create_or_update_recordthresher_record()
         db.session.merge(self)
+
+    def create_or_update_recordthresher_record(self):
+        if rt_record := CrossrefRecordMaker.make_record(self):
+            db.session.merge(rt_record)
+            self.recordthresher_id = rt_record.id
 
     def set_results(self):
         self.issns_jsonb = self.issns
@@ -673,7 +726,7 @@ class Pub(db.Model):
 
     def has_changed(self, old_response_jsonb, ignored_keys, ignored_top_level_keys):
         if not old_response_jsonb:
-            logger.info(u"response for {} has changed: no old response".format(self.id))
+            logger.info("response for {} has changed: no old response".format(self.id))
             return True
 
         copy_of_new_response = Pub.remove_response_keys(self.response_jsonb, ignored_top_level_keys)
@@ -686,16 +739,16 @@ class Pub(db.Model):
 
         for key in ignored_keys:
             # remove it
-            copy_of_new_response_in_json = re.sub(ur'"{}":\s*".+?",?\s*'.format(key), '', copy_of_new_response_in_json)
-            copy_of_old_response_in_json = re.sub(ur'"{}":\s*".+?",?\s*'.format(key), '', copy_of_old_response_in_json)
+            copy_of_new_response_in_json = re.sub(r'"{}":\s*".+?",?\s*'.format(key), '', copy_of_new_response_in_json)
+            copy_of_old_response_in_json = re.sub(r'"{}":\s*".+?",?\s*'.format(key), '', copy_of_old_response_in_json)
 
             # also remove it if it is an empty list
-            copy_of_new_response_in_json = re.sub(ur'"{}":\s*\[\],?\s*'.format(key), '', copy_of_new_response_in_json)
-            copy_of_old_response_in_json = re.sub(ur'"{}":\s*\[\],?\s*'.format(key), '', copy_of_old_response_in_json)
+            copy_of_new_response_in_json = re.sub(r'"{}":\s*\[\],?\s*'.format(key), '', copy_of_new_response_in_json)
+            copy_of_old_response_in_json = re.sub(r'"{}":\s*\[\],?\s*'.format(key), '', copy_of_old_response_in_json)
 
             # also anything till a comma (gets data_standard)
-            copy_of_new_response_in_json = re.sub(ur'"{}":\s*.+?,\s*'.format(key), '', copy_of_new_response_in_json)
-            copy_of_old_response_in_json = re.sub(ur'"{}":\s*.+?,\s*'.format(key), '', copy_of_old_response_in_json)
+            copy_of_new_response_in_json = re.sub(r'"{}":\s*.+?,\s*'.format(key), '', copy_of_new_response_in_json)
+            copy_of_old_response_in_json = re.sub(r'"{}":\s*.+?,\s*'.format(key), '', copy_of_old_response_in_json)
 
         return copy_of_new_response_in_json != copy_of_old_response_in_json
 
@@ -706,8 +759,7 @@ class Pub(db.Model):
         if not self.crossref_api_raw_new:
             self.crossref_api_raw_new = self.crossref_api_raw
 
-        if not self.title or self.title == 'OUP accepted manuscript':
-            self.title = self.crossref_title
+        self.title = self.crossref_title
         self.normalized_title = normalize_title(self.title)
         if not self.published_date:
             self.published_date = self.issued
@@ -720,7 +772,7 @@ class Pub(db.Model):
         try:
             self.recalculate()
         except NoDoiException:
-            logger.info(u"invalid doi {}".format(self))
+            logger.info("invalid doi {}".format(self))
             self.error += "Invalid DOI"
             pass
 
@@ -730,37 +782,46 @@ class Pub(db.Model):
         self.store_pdf_urls_for_validation()
         self.store_refresh_priority()
         self.store_preprint_relationships()
+        self.store_retractions()
+        response_changed = self.decide_if_response_changed(old_response_jsonb)
+
+    def decide_if_response_changed(self, old_response_jsonb):
+        response_changed = False
 
         if self.has_changed(old_response_jsonb, Pub.ignored_keys_for_external_diff(), Pub.ignored_top_level_keys_for_external_diff()):
-            logger.info(u"changed! updating last_changed_date for this record! {}".format(self.id))
+            logger.info("changed! updating last_changed_date for this record! {}".format(self.id))
             self.last_changed_date = datetime.datetime.utcnow().isoformat()
-            flag_modified(self, "response_jsonb")  # force it to be saved
+            response_changed = True
 
         if self.has_changed(old_response_jsonb, Pub.ignored_keys_for_internal_diff(), []):
-            logger.info(u"changed! updating updated timestamp for this record! {}".format(self.id))
+            logger.info("changed! updating updated timestamp for this record! {}".format(self.id))
             self.updated = datetime.datetime.utcnow()
             self.response_jsonb['updated'] = datetime.datetime.utcnow().isoformat()
-            flag_modified(self, "response_jsonb")  # force it to be saved
+            response_changed = True
 
-        # after recalculate, so can know if is open
-        # self.set_abstracts()
+        if response_changed:
+            flag_modified(self, "response_jsonb")  # force it to be saved
+        else:
+            self.response_jsonb = old_response_jsonb  # don't save if only ignored fields changed
+
+        return response_changed
 
     def run(self):
         try:
             self.recalculate_and_store()
         except NoDoiException:
-            logger.info(u"invalid doi {}".format(self))
+            logger.info("invalid doi {}".format(self))
             self.error += "Invalid DOI"
             pass
         # logger.info(json.dumps(self.response_jsonb, indent=4))
 
     def run_with_hybrid(self, quiet=False, shortcut_data=None):
-        logger.info(u"in run_with_hybrid")
+        logger.info("in run_with_hybrid")
         self.clear_results()
         try:
             self.refresh()
         except NoDoiException:
-            logger.info(u"invalid doi {}".format(self))
+            logger.info("invalid doi {}".format(self))
             self.error += "Invalid DOI"
             pass
 
@@ -801,7 +862,7 @@ class Pub(db.Model):
 
         override_dict = oa_manual.get_override_dict(self)
         if override_dict is not None:
-            logger.info(u"manual override for {}".format(self.doi))
+            logger.info("manual override for {}".format(self.doi))
             self.open_locations = []
             if override_dict:
                 my_location = OpenLocation()
@@ -813,14 +874,14 @@ class Pub(db.Model):
                 my_location.doi = self.doi
 
                 # set just what the override dict specifies
-                for (k, v) in override_dict.iteritems():
+                for (k, v) in override_dict.items():
                     setattr(my_location, k, v)
 
                 # don't append, make it the only one
                 self.open_locations.append(my_location)
 
     def ask_preprints(self):
-        preprint_relationships = Preprint.query.filter(Preprint.postprint_id == self.doi).all()
+        preprint_relationships = FilteredPreprint.query.filter(FilteredPreprint.postprint_id == self.doi).all()
         for preprint_relationship in preprint_relationships:
             preprint_pub = Pub.query.get(preprint_relationship.preprint_id)
             if preprint_pub:
@@ -836,7 +897,7 @@ class Pub(db.Model):
                     pass
 
     def ask_postprints(self):
-        preprint_relationships = Preprint.query.filter(Preprint.preprint_id == self.doi).all()
+        preprint_relationships = FilteredPreprint.query.filter(FilteredPreprint.preprint_id == self.doi).all()
         for preprint_relationship in preprint_relationships:
             postprint_pub = Pub.query.get(preprint_relationship.postprint_id)
             if postprint_pub:
@@ -918,7 +979,7 @@ class Pub(db.Model):
             my_page.scrape()
 
     def refresh_hybrid_scrape(self):
-        logger.info(u"***** {}: {}".format(self.publisher, self.journal))
+        logger.info("***** {}: {}".format(self.publisher, self.journal))
         # look for hybrid
         self.scrape_updated = datetime.datetime.utcnow()
 
@@ -942,10 +1003,13 @@ class Pub(db.Model):
 
                 self.scrape_page_for_open_location(publisher_landing_page)
                 self.resolved_doi_url = publisher_landing_page.resolved_url
+                self.resolved_doi_http_status = publisher_landing_page.resolved_http_status_code
 
                 # now merge our object back in
                 # logger.info(u"after scrape, merging {}".format(self.doi))
                 db.session.merge(self)
+
+                self.save_landing_page_text(publisher_landing_page.page_text)
 
                 if publisher_landing_page.is_open:
                     self.scrape_evidence = publisher_landing_page.open_version_source_string
@@ -974,9 +1038,31 @@ class Pub(db.Model):
 
         return
 
+    def save_landing_page_text(self, page_text):
+        if not page_text:
+            return
+
+        try:
+            logger.info(f'saving {len(page_text)} characters to {self.landing_page_archive_url()}')
+            client = boto3.client('s3')
+            client.put_object(
+                Body=gzip.compress(page_text.encode('utf-8')),
+                Bucket=LANDING_PAGE_ARCHIVE_BUCKET,
+                Key=self.landing_page_archive_key()
+            )
+            self.doi_landing_page_is_archived = True
+        except Exception as e:
+            # page text is just nice-to-have for now
+            logger.error(f'failed to save landing page: {e}')
+
     def find_open_locations(self, ask_preprint=True):
         # just based on doi
-        self.ask_local_lookup()
+        if local_lookup := self.ask_local_lookup():
+            if local_lookup['is_future']:
+                self.embargoed_locations.append(local_lookup['location'])
+            else:
+                self.open_locations.append(local_lookup['location'])
+
         self.ask_pmc()
 
         # based on titles
@@ -994,6 +1080,12 @@ class Pub(db.Model):
         self.ask_manual_overrides()
         self.remove_redundant_embargoed_locations()
 
+    def landing_page_archive_key(self):
+        return urllib.parse.quote(self.doi, safe='')
+
+    def landing_page_archive_url(self):
+        return f's3://{LANDING_PAGE_ARCHIVE_BUCKET}/{self.landing_page_archive_key()}'
+
     def remove_redundant_embargoed_locations(self):
         if any([loc.host_type == 'publisher' for loc in self.all_oa_locations]):
             self.embargoed_locations = [loc for loc in self.embargoed_locations if loc.host_type != 'publisher']
@@ -1006,14 +1098,26 @@ class Pub(db.Model):
         pdf_url = None
         version = "publishedVersion"  # default
         oa_date = None
+        publisher_specific_license = None
 
         if oa_local.is_open_via_doaj(self.issns, self.all_journals, self.year):
             license = oa_local.is_open_via_doaj(self.issns, self.all_journals, self.year)
             evidence = oa_evidence.oa_journal_doaj
             oa_date = self.issued
+            crossref_license = oa_local.is_open_via_license_urls(self.crossref_licenses, self.issns)
+            if crossref_license:
+                freetext_license = crossref_license['url']
+                license = oa_local.find_normalized_license(freetext_license)
+            elif (
+                any(self.is_same_publisher(p) for p in ['BMJ', 'Swiss Chemical Society'])
+                and self.scrape_license
+            ):
+                license = self.scrape_license
         elif oa_local.is_open_via_publisher(self.publisher):
             evidence = oa_evidence.oa_journal_publisher
             license = oa_local.find_normalized_license(oa_local.is_open_via_publisher(self.publisher))
+            if license == 'implied-oa' and self.scrape_license:
+                license = self.scrape_license
             oa_date = self.issued
         elif oa_local.is_open_via_publisher_genre(self.publisher, self.genre):
             evidence = oa_evidence.oa_journal_publisher
@@ -1028,6 +1132,9 @@ class Pub(db.Model):
             license = oa_local.manual_gold_journal_license(self.issn_l)
         elif oa_local.is_open_via_doi_fragment(self.doi):
             evidence = "oa repository (via doi prefix)"
+            oa_date = self.issued
+        elif oa_local.is_open_via_journal_doi_prefix(self.doi):
+            evidence = "oa journal (via doi prefix)"
             oa_date = self.issued
         elif oa_local.is_open_via_url_fragment(self.url):
             evidence = "oa repository (via url prefix)"
@@ -1045,11 +1152,12 @@ class Pub(db.Model):
             license = oa_local.find_normalized_license(freetext_license)
             oa_date = manuscript_license['date'] or self.issued
             if freetext_license and not license:
-                license = "publisher-specific, author manuscript: {}".format(freetext_license)
+                license = "publisher-specific, author manuscript"
+                publisher_specific_license = freetext_license
             version = "acceptedVersion"
             if self.is_same_publisher("Elsevier BV"):
                 elsevier_id = self.crossref_alternative_id
-                pdf_url = u"http://manuscript.elsevier.com/{}/pdf/{}.pdf".format(elsevier_id, elsevier_id)
+                pdf_url = "http://manuscript.elsevier.com/{}/pdf/{}.pdf".format(elsevier_id, elsevier_id)
             elif self.is_same_publisher("American Physical Society (APS)"):
                 proper_case_id = self.id
                 proper_case_id = proper_case_id.replace("revmodphys", "RevModPhys")
@@ -1065,7 +1173,7 @@ class Pub(db.Model):
                 proper_case_id = proper_case_id.replace("physrevphyseducres", "PhysRevPhysEducRes")
                 proper_case_id = proper_case_id.replace("physrevstper", "PhysRevSTPER")
                 if proper_case_id != self.id:
-                    pdf_url = u"https://link.aps.org/accepted/{}".format(proper_case_id)
+                    pdf_url = "https://link.aps.org/accepted/{}".format(proper_case_id)
             elif self.is_same_publisher("AIP Publishing"):
                 pdf_url = "https://aip.scitation.org/doi/{}".format(self.id)
             elif self.is_same_publisher("IOP Publishing"):
@@ -1073,7 +1181,9 @@ class Pub(db.Model):
             elif self.is_same_publisher("Wiley-Blackwell"):
                 has_open_manuscript = False
             elif self.is_same_publisher("Wiley"):
-                pdf_url = u'https://rss.onlinelibrary.wiley.com/doi/am-pdf/{}'.format(self.doi)
+                pdf_url = 'https://rss.onlinelibrary.wiley.com/doi/am-pdf/{}'.format(self.doi)
+            elif self.is_same_publisher("American Geophysical Union (AGU)"):
+                pdf_url = 'https://rss.onlinelibrary.wiley.com/doi/am-pdf/{}'.format(self.doi)
             elif self.is_same_publisher("Royal Society of Chemistry (RSC)"):
                 has_open_manuscript = False
             elif self.is_same_publisher("Oxford University Press (OUP)"):
@@ -1092,7 +1202,7 @@ class Pub(db.Model):
                 # else:
                 #     logger.info(u"is NOT iop open manuscript")
                 #     has_open_manuscript = False
-            elif freetext_license == u'https://academic.oup.com/journals/pages/open_access/funder_policies/chorus/standard_publication_model':
+            elif freetext_license == 'https://academic.oup.com/journals/pages/open_access/funder_policies/chorus/standard_publication_model':
                 # license says available after 12 months
                 oa_date = self.issued + relativedelta(months=12)
 
@@ -1102,7 +1212,20 @@ class Pub(db.Model):
             evidence = "embargoed (via journal policy)"
             oa_date = self.predicted_bronze_embargo_end
 
-        if evidence:
+        if (
+            evidence
+            and self.resolved_doi_url
+            and self.resolved_doi_url.startswith('https://journals.co.za')
+            and self.resolved_doi_http_status == 404
+        ):
+            fulltext_url = 'https://journals.co.za/doi/{}'.format(self.id.upper())
+            self.resolved_doi_http_status = 203
+
+        failed_scrape = self.resolved_doi_http_status in [404, -1] and self.issn_l not in [
+            '2324-1098',  # gold and online, but can't scrape it for some reason
+        ]
+
+        if evidence and not failed_scrape:
             my_location = OpenLocation()
             my_location.metadata_url = fulltext_url
             my_location.license = license
@@ -1111,6 +1234,7 @@ class Pub(db.Model):
             my_location.doi = self.doi
             my_location.version = version
             my_location.oa_date = oa_date
+            my_location.publisher_specific_license = publisher_specific_license
             if pdf_url:
                 my_location.pdf_url = pdf_url
 
@@ -1122,10 +1246,9 @@ class Pub(db.Model):
             if self.is_preprint:
                 self.make_preprint(my_location)
 
-            if is_future:
-                self.embargoed_locations.append(my_location)
-            else:
-                self.open_locations.append(my_location)
+            return {'location': my_location, 'is_future': is_future}
+
+        return None
 
     def ask_pmc(self):
         for pmc_obj in self.pmcid_links:
@@ -1165,11 +1288,18 @@ class Pub(db.Model):
             if my_location.oa_status in [OAStatus.gold, OAStatus.hybrid, OAStatus.green]:
                 my_location.oa_date = self.issued
 
-            self.open_locations.append(my_location)
+            if self.issn_l == '0270-6474' and my_location.oa_date:
+                my_location.oa_date = my_location.oa_date + datetime.timedelta(days=190)
+                if my_location.oa_date and my_location.oa_date > datetime.datetime.utcnow().date():
+                    self.embargoed_locations.append(my_location)
+                else:
+                    self.open_locations.append(my_location)
+            else:
+                self.open_locations.append(my_location)
 
     @property
     def page_matches_by_doi_filtered(self):
-        return self.page_matches_by_doi + self.page_new_matches_by_doi
+        return self.page_matches_by_doi + self.repo_page_matches_by_doi
 
     @property
     def page_matches_by_title_filtered(self):
@@ -1179,13 +1309,13 @@ class Pub(db.Model):
         if not self.normalized_title:
             return my_pages
 
-        for my_page in self.page_new_matches_by_title:
+        for my_page in self.repo_page_matches_by_title:
             # don't do this right now.  not sure if it helps or hurts.
             # don't check title match if we already know it belongs to a different doi
             # if my_page.doi and my_page.doi != self.doi:
             #     continue
 
-            if hasattr(my_page, "pmh_record") and my_page.pmh_record and is_known_mismatch(self.id, my_page.pmh_record.bare_pmh_id):
+            if hasattr(my_page, "pmh_record") and my_page.pmh_record and is_known_mismatch(self.id, my_page.pmh_record):
                 continue
 
             # double check author match
@@ -1193,7 +1323,7 @@ class Pub(db.Model):
             if self.first_author_lastname or self.last_author_lastname:
                 if my_page.authors:
                     try:
-                        pmh_author_string = normalize(u", ".join(my_page.authors))
+                        pmh_author_string = normalize(", ".join(my_page.authors))
                         if self.first_author_lastname and normalize(self.first_author_lastname) in pmh_author_string:
                             match_type = "title and first author"
                         elif self.last_author_lastname and normalize(self.last_author_lastname) in pmh_author_string:
@@ -1207,7 +1337,7 @@ class Pub(db.Model):
                             continue
                     except TypeError:
                         pass  # couldn't make author string
-            my_page.match_evidence = u"oa repository (via OAI-PMH {} match)".format(match_type)
+            my_page.match_evidence = "oa repository (via OAI-PMH {} match)".format(match_type)
             my_pages.append(my_page)
         return my_pages
 
@@ -1223,24 +1353,22 @@ class Pub(db.Model):
             elif title_is_too_common(self.normalized_title):
                 # logger.info(u"title too common!  don't match by title.")
                 pass
-            elif self.id and u'/(issn)' in self.id.lower():
+            elif self.id and '/(issn)' in self.id.lower():
                 pass
             else:
                 my_pages = self.page_matches_by_title_filtered
 
+        if max_pages_from_one_repo([p.endpoint_id for p in self.page_matches_by_title_filtered]) >= 10:
+            my_pages = []
+            logger.info("matched too many pages in one repo, not allowing matches")
+
         # do dois last, because the objects are actually the same, not copies, and then they get the doi reason
         for my_page in self.page_matches_by_doi_filtered:
-            my_page.match_evidence = u"oa repository (via OAI-PMH doi match)"
-            if not my_page.scrape_version and u"/pmc/" in my_page.url:
+            my_page.match_evidence = "oa repository (via OAI-PMH doi match)"
+            if not my_page.scrape_version and "/pmc/" in my_page.url:
                 my_page.set_info_for_pmc_page()
 
             my_pages.append(my_page)
-
-        # eventually only apply this filter to matches by title, once pages only includes
-        # the doi when it comes straight from the pmh record
-        if max_pages_from_one_repo([p.endpoint_id for p in self.page_matches_by_title_filtered]) >= 10:
-            my_pages = []
-            logger.info(u"matched too many pages in one repo, not allowing matches")
 
         return [
             p for p in my_pages
@@ -1306,7 +1434,7 @@ class Pub(db.Model):
         lookup = db.session.query(S2Lookup).get(self.doi)
         if lookup:
             location = OpenLocation()
-            location.endpoint_id = 'trmgzrn8eq4yx7ddvmzs'
+            location.endpoint_id = s2_endpoint_id
             location.pdf_url = lookup.s2_pdf_url
             location.metadata_url = lookup.s2_url
             location.evidence = 'oa repository (semantic scholar lookup)'
@@ -1330,6 +1458,10 @@ class Pub(db.Model):
 
     def scrape_page_for_open_location(self, my_webpage):
         try:
+            if not self.should_scrape_publisher_page():
+                logger.info('skipping publisher scrape')
+                return
+
             find_pdf_link = self.should_look_for_publisher_pdf()
 
             if not find_pdf_link:
@@ -1348,41 +1480,57 @@ class Pub(db.Model):
                 # logger.info(u"didn't find open version at", webpage.url)
                 pass
 
-        except requests.Timeout, e:
+        except requests.Timeout as e:
             self.error += "Timeout in scrape_page_for_open_location on {}: {}".format(
-                my_webpage, unicode(e.message).encode("utf-8"))
+                my_webpage, str(e))
             logger.info(self.error)
-        except requests.exceptions.ConnectionError, e:
+        except requests.exceptions.ConnectionError as e:
             self.error += "ConnectionError in scrape_page_for_open_location on {}: {}".format(
-                my_webpage, unicode(e.message).encode("utf-8"))
+                my_webpage, str(e))
             logger.info(self.error)
-        except requests.exceptions.ChunkedEncodingError, e:
+        except requests.exceptions.ChunkedEncodingError as e:
             self.error += "ChunkedEncodingError in scrape_page_for_open_location on {}: {}".format(
-                my_webpage, unicode(e.message).encode("utf-8"))
+                my_webpage, str(e))
             logger.info(self.error)
-        except requests.exceptions.RequestException, e:
+        except requests.exceptions.RequestException as e:
             self.error += "RequestException in scrape_page_for_open_location on {}: {}".format(
-                my_webpage, unicode(e.message).encode("utf-8"))
+                my_webpage, str(e))
             logger.info(self.error)
-        except etree.XMLSyntaxError, e:
+        except etree.XMLSyntaxError as e:
             self.error += "XMLSyntaxError in scrape_page_for_open_location on {}: {}".format(
-                my_webpage, unicode(e.message).encode("utf-8"))
+                my_webpage, str(e))
             logger.info(self.error)
         except Exception:
-            logger.exception(u"Exception in scrape_page_for_open_location")
+            logger.exception("Exception in scrape_page_for_open_location")
             self.error += "Exception in scrape_page_for_open_location"
             logger.info(self.error)
 
-    def should_look_for_publisher_pdf(self):
-        if self.genre == 'book':
+    def should_scrape_publisher_page(self):
+        if self.genre == 'journal':
             return False
 
-        # landing page has pdfs for every article in issue
+        return True
+
+    def should_look_for_publisher_pdf(self):
+        if self.genre == 'book':
+            if self.is_same_publisher('Université Paris Cité'):
+                return True
+            else:
+                return False
+
         if self.issn_l in [
+            # landing page has pdfs for every article in issue
             '1818-5487',  # Aquatic Invasions
             '2072-5981',  # Magnetic resonance in solids
             '1989-8649',  # Management of Biological Invasions
             '2164-3989',  # The Professional Counselor
+            '0970-9274',  # Journal of Human Ecology
+            '0973-5070',  # STUDIES ON ETHNO-MEDICINE
+            # in doaj, PDF has full issue so landing page is more specific
+            '2471-190X',  # Open Rivers: Rethinking Water, Place & Community
+            '0097-6156',  # Books
+            # in doaj, doi leads to current issue so PDF is useless
+            '0210-6124',  # Atlantis. Journal of the Spanish Association for Anglo-American Studies
         ]:
             return False
 
@@ -1411,13 +1559,17 @@ class Pub(db.Model):
 
             # is a closed-access datacite one, with the open-access version in BASE
             # need to set title here because not looking up datacite titles yet (because ususally open access directly)
-            "10.1515/fabl.1988.29.1.21": u"Thesen zur Verabschiedung des Begriffs der 'historischen Sage'",
+            "10.1515/fabl.1988.29.1.21": "Thesen zur Verabschiedung des Begriffs der 'historischen Sage'",
 
             # preprint has a different title
-            "10.1123/iscj.2016-0037": u"METACOGNITION AND PROFESSIONAL JUDGMENT AND DECISION MAKING: IMPORTANCE, APPLICATION AND EVALUATION",
+            "10.1123/iscj.2016-0037": "METACOGNITION AND PROFESSIONAL JUDGMENT AND DECISION MAKING: IMPORTANCE, APPLICATION AND EVALUATION",
 
             # preprint has a different title
-            "10.1038/s41477-017-0066-9": u"Low Rate of Somatic Mutations in a Long-Lived Oak Tree",
+            "10.1038/s41477-017-0066-9": "Low Rate of Somatic Mutations in a Long-Lived Oak Tree",
+            "10.1101/2020.08.10.238428": "Cell-programmed nutrient partitioning in the tumour microenvironment",
+
+            # mysteriously missing from crossref now
+            "10.1093/annweh/wxy044": "Development of and Selected Performance Characteristics of CANJEM, a General Population Job-Exposure Matrix Based on Past Expert Assessments of Exposure"
         }
 
         if self.doi in workaround_titles:
@@ -1425,21 +1577,49 @@ class Pub(db.Model):
             self.normalized_title = normalize_title(self.title)
 
     def set_license_hacks(self):
-        if self.fulltext_url and u"harvard.edu/" in self.fulltext_url:
+        if self.fulltext_url and "harvard.edu/" in self.fulltext_url:
             if not self.license or self.license == "unknown":
                 self.license = "cc-by-nc"
 
     @property
     def crossref_alternative_id(self):
         try:
-            return re.sub(ur"\s+", " ", self.crossref_api_raw_new["alternative-id"][0])
+            return re.sub(r"\s+", " ", self.crossref_api_raw_new["alternative-id"][0])
         except (KeyError, TypeError, AttributeError):
             return None
 
     @property
     def publisher(self):
         try:
-            return re.sub(u"\s+", " ", self.crossref_api_modified["publisher"])
+            return re.sub("\s+", " ", self.crossref_api_modified["publisher"])
+        except (KeyError, TypeError, AttributeError):
+            return None
+
+    @property
+    def volume(self):
+        try:
+            return self.crossref_api_raw_new["volume"]
+        except (KeyError, TypeError, AttributeError):
+            return None
+
+    @property
+    def issue(self):
+        try:
+            return self.crossref_api_raw_new["issue"]
+        except (KeyError, TypeError, AttributeError):
+            return None
+
+    @property
+    def first_page(self):
+        try:
+            return self.crossref_api_raw_new["page"].split('-')[0]
+        except (KeyError, TypeError, AttributeError):
+            return None
+
+    @property
+    def last_page(self):
+        try:
+            return self.crossref_api_raw_new["page"].split('-')[-1]
         except (KeyError, TypeError, AttributeError):
             return None
 
@@ -1451,12 +1631,29 @@ class Pub(db.Model):
                 return get_citeproc_date(*date_parts)
         except (KeyError, TypeError, AttributeError):
             return None
+    @property
+    def crossref_published(self):
+        try:
+            if self.crossref_api_raw_new and "date-parts" in self.crossref_api_raw_new["published"]:
+                date_parts = self.crossref_api_raw_new["published"]["date-parts"][0]
+                return get_citeproc_date(*date_parts)
+        except (KeyError, TypeError, AttributeError):
+            return None
 
     @property
     def deposited(self):
         try:
             if self.crossref_api_raw_new and "date-parts" in self.crossref_api_raw_new["deposited"]:
                 date_parts = self.crossref_api_raw_new["deposited"]["date-parts"][0]
+                return get_citeproc_date(*date_parts)
+        except (KeyError, TypeError, AttributeError):
+            return None
+
+    @property
+    def created(self):
+        try:
+            if self.crossref_api_raw_new and "date-parts" in self.crossref_api_raw_new["created"]:
+                date_parts = self.crossref_api_raw_new["created"]["date-parts"][0]
                 return get_citeproc_date(*date_parts)
         except (KeyError, TypeError, AttributeError):
             return None
@@ -1486,7 +1683,7 @@ class Pub(db.Model):
 
                 license_date = None
                 if license_dict.get("content-version", None):
-                    if license_dict["content-version"] == u"am":
+                    if license_dict["content-version"] == "am":
                         if license_dict.get("start", None):
                             if license_dict["start"].get("date-time", None):
                                 license_date = license_dict["start"]["date-time"]
@@ -1512,6 +1709,15 @@ class Pub(db.Model):
 
     @property
     def crossref_licenses(self):
+        unspecified_version_publishers = [
+            'Informa UK Limited',
+            'Geological Society of London',
+        ]
+        allow_unspecified = any([self.is_same_publisher(p) for p in unspecified_version_publishers])
+
+        tdm_publishers = ['Uniwersytet Jagiellonski - Wydawnictwo Uniwersytetu Jagiellonskiego']
+        allow_tdm = any([self.is_same_publisher(p) for p in tdm_publishers])
+
         try:
             license_dicts = self.crossref_api_modified["license"]
             license_urls = []
@@ -1519,8 +1725,12 @@ class Pub(db.Model):
             for license_dict in license_dicts:
                 license_date = None
 
-                if license_dict.get("content-version", None):
-                    if license_dict["content-version"] == u"vor":
+                if license_version := license_dict.get("content-version", None):
+                    if (
+                        license_version == "vor"
+                        or (allow_unspecified and license_version == "unspecified")
+                        or (allow_tdm and license_version == "tdm")
+                    ):
                         if license_dict.get("start", None):
                             if license_dict["start"].get("date-time", None):
                                 license_date = license_dict["start"].get("date-time", None)
@@ -1608,7 +1818,7 @@ class Pub(db.Model):
                 issns = self.crossref_api_modified["issn"]
             except (AttributeError, TypeError, KeyError):
                 if self.tdm_api:
-                    issns = re.findall(u"<issn media_type=.*>(.*)</issn>", self.tdm_api)
+                    issns = re.findall("<issn media_type=.*>(.*)</issn>", self.tdm_api)
         if not issns:
             return None
         else:
@@ -1617,13 +1827,13 @@ class Pub(db.Model):
     @property
     def best_title(self):
         if hasattr(self, "title") and self.title:
-            return re.sub(u"\s+", " ", self.title)
+            return re.sub("\s+", " ", self.title)
         return self.crossref_title
 
     @property
     def crossref_title(self):
         try:
-            return re.sub(u"\s+", " ", self.crossref_api_modified["title"])
+            return re.sub("\s+", " ", self.crossref_api_modified["title"])
         except (AttributeError, TypeError, KeyError, IndexError):
             return None
 
@@ -1637,7 +1847,7 @@ class Pub(db.Model):
     @property
     def journal(self):
         try:
-            return re.sub(u"\s+", " ", self.crossref_api_modified["journal"])
+            return re.sub("\s+", " ", self.crossref_api_modified["journal"])
         except (AttributeError, TypeError, KeyError, IndexError):
             return None
 
@@ -1651,7 +1861,7 @@ class Pub(db.Model):
     @property
     def genre(self):
         try:
-            return re.sub(u"\s+", " ", self.crossref_api_modified["type"])
+            return re.sub("\s+", " ", self.crossref_api_modified["type"])
         except (AttributeError, TypeError, KeyError):
             return None
 
@@ -1668,9 +1878,19 @@ class Pub(db.Model):
         sorted_locations = self.sorted_locations
 
         # transfer PDF URLs from bronze location to hybrid location
-        # then best_url is the same and they aren't duplicated
-        publisher_no_pdf = [loc for loc in sorted_locations if loc.host_type == "publisher" and not loc.pdf_url]
-        publisher_pdf = [loc for loc in sorted_locations if loc.host_type == "publisher" and loc.pdf_url]
+        # then best_url is the same, and they aren't duplicated
+        # be very conservative - only merge if exactly one location with pdf and one without,
+        # and both are published versions hosted by the publisher
+
+        publisher_no_pdf = [
+            loc for loc in sorted_locations
+            if loc.host_type == "publisher" and loc.version == "publishedVersion" and not loc.pdf_url
+        ]
+
+        publisher_pdf = [
+            loc for loc in sorted_locations
+            if loc.host_type == "publisher" and loc.version == "publishedVersion" and loc.pdf_url
+        ]
 
         if len(publisher_no_pdf) == 1 and len(publisher_pdf) == 1:
             if publisher_no_pdf[0].metadata_url == publisher_pdf[0].metadata_url:
@@ -1698,6 +1918,13 @@ class Pub(db.Model):
             and x.endpoint_id != '58e562cef9eb07c3c1d'  # garbage PDFs in identifier tags
         ]
 
+        for location in valid_locations:
+            if location.pdf_url:
+                location.pdf_url = fix_url_scheme(location.pdf_url)
+
+            if location.metadata_url:
+                location.metadata_url = fix_url_scheme(location.metadata_url)
+
         return valid_locations
 
     @property
@@ -1722,7 +1949,7 @@ class Pub(db.Model):
             # can't really do anything if they would match different issn_ls
             lookup = db.session.query(IssnlLookup).get(issn)
             if lookup:
-                return lookup.issn_l
+                return lookup
 
         return None
 
@@ -1745,7 +1972,7 @@ class Pub(db.Model):
             self.my_resolved_url_cached = r.url
 
         except Exception:  #hardly ever do this, but man it seems worth it right here
-            logger.exception(u"get_resolved_url failed")
+            logger.exception("get_resolved_url failed")
             self.my_resolved_url_cached = None
 
         return self.my_resolved_url_cached
@@ -1755,7 +1982,7 @@ class Pub(db.Model):
             my_string = self.id
         else:
             my_string = self.best_title
-        return u"<Pub ( {} )>".format(my_string)
+        return "<Pub ( {} )>".format(my_string)
 
     @property
     def reported_noncompliant_copies(self):
@@ -1908,6 +2135,10 @@ class Pub(db.Model):
                 return True
             if self.is_open_journal_via_observed_oa_rate():
                 return True
+            if oa_local.is_open_via_publisher_genre(self.publisher, self.genre):
+                return True
+            if oa_local.is_open_via_journal_doi_prefix(self.doi):
+                return True
         return False
 
     @property
@@ -1924,9 +2155,6 @@ class Pub(db.Model):
 
     @property
     def display_abstracts(self):
-        # self.set_abstracts()
-        # return [a.to_dict() for a in self.abstracts]
-
         return []
 
     @property
@@ -1991,8 +2219,6 @@ class Pub(db.Model):
                 # links don't resolve
                 '1507-1367' in self.issns or
                 # links don't resolve
-                '0718-1876' in self.issns or
-                # links don't resolve
                 '2237-0722' in self.issns
             )) or
             # pdf abstracts
@@ -2006,7 +2232,7 @@ class Pub(db.Model):
 
     def store_refresh_priority(self):
         stmt = sql.text(
-            u'update pub_refresh_queue set priority = :priority where id = :id'
+            'update pub_refresh_queue set priority = :priority where id = :id'
         ).bindparams(priority=self.refresh_priority, id=self.id)
         db.session.execute(stmt)
 
@@ -2035,6 +2261,23 @@ class Pub(db.Model):
         for preprint_relationship in preprint_relationships:
             db.session.merge(Preprint(**preprint_relationship))
 
+    def store_retractions(self):
+        retracted_dois = set()
+
+        if self.crossref_api_raw_new:
+            for update_to in self.crossref_api_raw_new.get('update-to', []):
+                if update_to.get('type') == 'retraction':
+                    if retracted_doi := normalize_doi(update_to.get('DOI'), return_none_if_error=True):
+                        retracted_dois.add(retracted_doi)
+
+        db.session.query(Retraction).filter(
+            Retraction.retraction_doi == self.doi,
+            Retraction.retracted_doi.notin_(list(retracted_dois))
+        ).delete()
+
+        for retracted_doi in retracted_dois:
+            db.session.merge(Retraction(retraction_doi=self.doi, retracted_doi=retracted_doi))
+
     def store_pdf_urls_for_validation(self):
         urls = {loc.pdf_url for loc in self.open_locations if loc.pdf_url and not is_pmc(loc.pdf_url)}
 
@@ -2047,104 +2290,36 @@ class Pub(db.Model):
         for p in oa_page.make_oa_pages(self):
             db.session.merge(p)
 
-    def set_abstracts(self):
-        start_time = time()
-
-        abstract_objects = []
-
-        # already have abstracts, don't keep trying
-        if self.abstracts:
-            logger.info(u"already had abstract stored!")
-            return
-
-        # try locally first
-        if self.abstract_from_crossref:
-            abstract_objects.append(Abstract(source="crossref", source_id=self.doi, abstract=self.abstract_from_crossref, doi=self.id))
-
-        pmh_ids = [p.pmh_id for p in self.pages if p.pmh_id]
-        if pmh_ids:
-            pmh_records = db.session.query(PmhRecord).filter(PmhRecord.id.in_(pmh_ids)).all()
-            for pmh_record in pmh_records:
-                api_contents = pmh_record.api_raw.replace("\n", " ")
-                matches = re.findall(u"<dc:description>(.*?)</dc:description>", api_contents, re.IGNORECASE | re.MULTILINE)
-                if matches:
-                    concat_description = u"\n".join(matches).strip()
-                    abstract_objects.append(Abstract(source="pmh", source_id=pmh_record.id, abstract=concat_description, doi=self.id))
-
-        # the more time consuming checks, only do them if the paper is open and recent for now
-        # if self.is_oa and self.year and self.year == 2018:
-        if self.is_oa and self.year and self.year >= 2017:
-
-            # if nothing yet, query pmc with doi
-            if not abstract_objects:
-                result_list = query_pmc(self.id)
-                for result in result_list:
-                    if result.get("doi", None) == self.id:
-                        pmid = result.get("pmid", None)
-                        if u"abstractText" in result:
-                            abstract_text = result["abstractText"]
-                            abstract_obj = Abstract(source="pubmed", source_id=pmid, abstract=abstract_text, doi=self.id)
-                            try:
-                                abstract_obj.mesh = result["meshHeadingList"]["meshHeading"]
-                            except KeyError:
-                                pass
-                            try:
-                                abstract_obj.keywords = result["keywordList"]["keyword"]
-                            except KeyError:
-                                pass
-                            abstract_objects.append(abstract_obj)
-                            logger.info(u"got abstract from pubmed")
-
-            # removed mendeley from requirements for now due to library conflicts
-            # if not abstract_objects:
-            #     from oa_mendeley import query_mendeley
-            #     result = query_mendeley(self.id)
-            #     if result and result["abstract"]:
-            #         mendeley_url = result["mendeley_url"]
-            #         abstract_obj = Abstract(source="mendeley", source_id=mendeley_url, abstract=result["abstract"], doi=self.id)
-            #         abstract_objects.append(abstract_obj)
-            #         logger.info(u"GOT abstract from mendeley for {}".format(self.id))
-            #     else:
-            #         logger.info(u"no abstract in mendeley for {}".format(self.id))
-
-            logger.info(u"spent {} seconds getting abstracts for {}, success: {}".format(elapsed(start_time), self.id, len(abstract_objects)>0))
-
-        # make sure to save what we got
-        for abstract in abstract_objects:
-            if abstract.source_id not in [a.source_id for a in self.abstracts]:
-                self.abstracts.append(abstract)
-
-    def to_dict_v2(self):
-        response = OrderedDict([
-            ("doi", self.doi),
-            ("doi_url", self.url),
-            ("title", self.best_title),
-            ("genre", self.genre),
-            ("is_paratext", self.is_paratext),
-            ("published_date", self.issued and self.issued.isoformat()),
-            ("year", self.year),
-            ("journal_name", self.journal),
-            ("journal_issns", self.display_issns),
-            ("journal_issn_l", self.issn_l),
-            ("journal_is_oa", self.oa_is_open_journal),
-            ("journal_is_in_doaj", self.oa_is_doaj_journal),
-            ("publisher", self.publisher),
-            ("is_oa", self.is_oa),
-            ("oa_status", self.oa_status and self.oa_status.value),
-            ("has_repository_copy", self.has_green),
-            ("best_oa_location", self.best_oa_location_dict),
-            ("first_oa_location", self.first_oa_location_dict),
-            ("oa_locations", self.all_oa_location_dicts()),
-            ("oa_locations_embargoed", self.embargoed_oa_location_dicts()),
-            ("updated", self.display_updated),
-            ("data_standard", self.data_standard),
-            ("z_authors", self.authors),
-            # "abstracts": self.display_abstracts,
+    @staticmethod
+    def dict_v2_fields():
+        return OrderedDict([
+            ("doi", lambda p: p.doi),
+            ("doi_url", lambda p: p.url),
+            ("title", lambda p: p.best_title),
+            ("genre", lambda p: p.genre),
+            ("is_paratext", lambda p: p.is_paratext),
+            ("published_date", lambda p: p.issued and p.issued.isoformat()),
+            ("year", lambda p: p.year),
+            ("journal_name", lambda p: p.journal),
+            ("journal_issns", lambda p: p.display_issns),
+            ("journal_issn_l", lambda p: p.issn_l),
+            ("journal_is_oa", lambda p: p.oa_is_open_journal),
+            ("journal_is_in_doaj", lambda p: p.oa_is_doaj_journal),
+            ("publisher", lambda p: p.publisher),
+            ("is_oa", lambda p: p.is_oa),
+            ("oa_status", lambda p: p.oa_status and p.oa_status.value),
+            ("has_repository_copy", lambda p: p.has_green),
+            ("best_oa_location", lambda p: p.best_oa_location_dict),
+            ("first_oa_location", lambda p: p.first_oa_location_dict),
+            ("oa_locations", lambda p: p.all_oa_location_dicts()),
+            ("oa_locations_embargoed", lambda p: p.embargoed_oa_location_dicts()),
+            ("updated", lambda p: p.display_updated),
+            ("data_standard", lambda p: p.data_standard),
+            ("z_authors", lambda p: p.authors),
         ])
 
-        # if self.error:
-        #     response["x_error"] = True
-
+    def to_dict_v2(self):
+        response = OrderedDict([(key, func(self)) for key, func in Pub.dict_v2_fields().items()])
         return response
 
     def to_dict_search(self):

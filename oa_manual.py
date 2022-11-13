@@ -11,10 +11,6 @@ def get_override_dict(pub):
 
     if pub.doi in overrides_dict:
         return overrides_dict[pub.doi]
-    elif pub.issn_l == '1099-5129' and pub.best_host == 'publisher':
-        # journal EP Europace, ticket 640
-        # fulltext links only work once
-        return {}
     elif pub.issn_l == '1330-7533' and pub.best_host == 'publisher':
         # Tourism and Hospitality Management, ticket 667
         # doi.org links don't work if referer header is set
@@ -40,7 +36,7 @@ def get_override_dict(pub):
         # ticket 22257
         # Environmental Engineering and Management Journal, doi.org URLs lead to abstracts
         return {}
-    elif pub.id == '10.1042/cs20200184' and pub.best_oa_location and u'(via crossref license)' in pub.best_oa_location.evidence:
+    elif pub.id == '10.1042/cs20200184' and pub.best_oa_location and '(via crossref license)' in pub.best_oa_location.evidence:
         return {}
     elif pub.id and pub.id.startswith('10.18267/pr.2019.los.186.'):
         return {
@@ -48,6 +44,16 @@ def get_override_dict(pub):
             "host_type_set": "publisher",
             "version": "publishedVersion",
         }
+    elif pub.issn_l == '1012-0254':
+        # gold journal, doi URLs are broken. ticket 22821
+        return {
+            'metadata_url': 'https://journals.co.za/doi/{}'.format(pub.id.upper()),
+            'version': 'publishedVersion',
+            'host_type_set': 'publisher',
+            'evidence': 'oa journal (via observed oa rate)',
+        }
+    elif pub.doi and pub.doi.startswith('10.1002/9781119237211.'):
+        return {}
     else:
         return None
 
@@ -894,12 +900,105 @@ def get_overrides_dict():
         'evidence': 'oa journal (via doaj)',
     }
 
+    # ticket 22936. journal in DOAJ, doi.org url 404s, same article as above
+    override_dict['10.1162/154475203771799720'] = {
+        'metadata_url': 'https://itidjournal.org/index.php/itid/article/view/136.html',
+        'pdf_url': 'https://itidjournal.org/index.php/itid/article/download/136/136-472-1-PB.pdf',
+        'license': 'cc-by-nc-sa',
+        'version': 'publishedVersion',
+        'host_type_set': 'publisher',
+        'evidence': 'oa journal (via doaj)',
+    }
+
     # ticket 22674. doesn't want to link to PDF for some reason.
     override_dict['10.1101/2020.02.24.962878'] = {
         'metadata_url': 'https://doi.org/10.1101/2020.02.24.962878',
         'version': 'submittedVersion',
         'host_type_set': 'repository',
         'evidence': 'oa repository (via free pdf)',
+    }
+
+    # ticket 22562. journal in DOAJ, broken doi.org url
+    override_dict['10.5505/tbdhd.2018.50251'] = {
+        'metadata_url': 'http://dergi.bdhd.org.tr/eng/jvi.aspx?un=TBDHD-50251&volume=24&issue=2',
+        'pdf_url': 'https://jag.journalagent.com/tbdhd/pdfs/TBDHD-50251-CASE_REPORT-YEKTAS.pdf',
+        'license': 'cc-by-nc-nd',
+        'version': 'publishedVersion',
+        'host_type_set': 'publisher',
+        'evidence': 'oa journal (via doaj)',
+    }
+
+    # ticket 22877. journal was detected as all-OA but DOIs don't work now
+    override_dict['10.14800/scti.232'] = {
+        'metadata_url': 'https://www.smartscitech.com/index.php/SCTI/article/view/828',
+        'version': 'publishedVersion',
+        'host_type_set': 'publisher',
+    }
+
+    # ticket 22945. first citeseerx link broken
+    override_dict['10.1111/1467-8306.9302004'] = {
+        'metadata_url': 'https://citeseerx.ist.psu.edu/viewdoc/summary?doi=10.1.1.109.1825',
+        'pdf_url': 'https://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.109.1825&rep=rep1&type=pdf',
+        'version': 'submittedVersion',
+        'host_type_set': 'repository',
+        'evidence': 'oa repository (via free pdf)',
+    }
+
+    # ticket 22967. first citeseerx link is slide deck
+    override_dict['10.1109/msp.2010.936019'] = {
+        'metadata_url': 'http://citeseerx.ist.psu.edu/viewdoc/summary?doi=10.1.1.470.8283',
+        'pdf_url': 'http://www1.se.cuhk.edu.hk/~manchoso/papers/sdrapp-SPM.pdf',
+        'version': 'acceptedVersion',
+        'host_type_set': 'repository',
+        'evidence': 'oa repository (via free pdf)',
+    }
+
+    # ticket 23017. can't scrape cairn
+    override_dict['10.3917/sr.035.0007'] = {
+        'metadata_url': 'https://doi.org/10.3917/sr.035.0007',
+        'version': 'publishedVersion',
+        'host_type_set': 'publisher',
+        'license': 'cc-by-nc-nd',
+    }
+
+    # ticket 23017. can't scrape cairn
+    override_dict['10.3917/sr.039.0119'] = {
+        'metadata_url': 'https://doi.org/10.3917/sr.039.0119',
+        'version': 'publishedVersion',
+        'host_type_set': 'publisher',
+        'license': 'cc-by-nc-nd',
+    }
+
+    # ticket 23020
+    override_dict['10.3847/2041-8213/abe4de'] = {
+        'metadata_url': 'https://doi.org/10.3847/2041-8213/abe4de',
+        'version': 'publishedVersion',
+        'host_type_set': 'publisher',
+        'license': 'cc-by',
+    }
+
+    # ticket 23020
+    override_dict['10.3847/2041-8213/abe71d'] = {
+        'metadata_url': 'https://doi.org/10.3847/2041-8213/abe71d',
+        'version': 'publishedVersion',
+        'host_type_set': 'publisher',
+        'license': 'cc-by',
+    }
+
+    # ticket 23020
+    override_dict['10.3847/2041-8213/abed53'] = {
+        'metadata_url': 'https://doi.org/10.3847/2041-8213/abed53',
+        'version': 'publishedVersion',
+        'host_type_set': 'publisher',
+        'license': 'cc-by',
+    }
+
+    # ticket 23020
+    override_dict['10.3847/2041-8213/abee6a'] = {
+        'metadata_url': 'https://doi.org/10.3847/2041-8213/abee6a',
+        'version': 'publishedVersion',
+        'host_type_set': 'publisher',
+        'license': 'cc-by',
     }
 
     # ticket 1025
@@ -940,6 +1039,18 @@ def get_overrides_dict():
     # ticket 22163. doing a favor.
     override_dict['10.1016/j.energy.2015.06.127'] = {}
 
+    # ticket 22794. page and metadata have license
+    override_dict['10.1515/pac-2020-0702'] = {}
+
+    # ticket 22791
+    override_dict['10.1038/s41574-020-00451-4'] = {}
+
+    # ticket 23164
+    override_dict['10.24920/003522'] = {}
+
+    # ticket 23293, bad license on bottom of publisher page
+    override_dict['10.1016/j.matpr.2020.04.809'] = {}
+
     # ticket 22636
     override_dict['10.1007/978-981-15-4814-7'] = {
         'metadata_url': 'https://doi.org/10.1007/978-981-15-4814-7',
@@ -948,13 +1059,102 @@ def get_overrides_dict():
         'evidence': 'open (via free pdf)',
     }
 
+    # ticket 23094, broken doi resolution
+    override_dict['10.12658/m0624'] = {
+        'metadata_url': 'https://insanvetoplum.org/en/issues/11-2/m0624',
+        'pdf_url': 'https://insanvetoplum.org/content/6-sayilar/28-11-2/6-m0624/peksan.pdf',
+        'version': 'publishedVersion',
+        'host_type_set': 'publisher',
+        'evidence': 'oa journal (via doaj)',
+        'license': 'cc-by-nc-nd',
+    }
+
+    override_dict['10.12658/m0622'] = {
+        'metadata_url': 'https://insanvetoplum.org/en/issues/11-2/m0622',
+        'pdf_url': 'https://insanvetoplum.org/content/6-sayilar/28-11-2/5-m0622/kose-tugsuz.pdf',
+        'version': 'publishedVersion',
+        'host_type_set': 'publisher',
+        'evidence': 'oa journal (via doaj)',
+        'license': 'cc-by-nc-nd',
+    }
+
+    override_dict['10.12658/m0617'] = {
+        'metadata_url': 'https://insanvetoplum.org/en/issues/11-2/m0617',
+        'pdf_url': 'https://insanvetoplum.org/content/6-sayilar/28-11-2/2-m0617/cevizli-bilen.pdf',
+        'version': 'publishedVersion',
+        'host_type_set': 'publisher',
+        'evidence': 'oa journal (via doaj)',
+        'license': 'cc-by-nc-nd',
+    }
+
+    override_dict['10.12658/m0618'] = {
+        'metadata_url': 'https://insanvetoplum.org/en/issues/11-2/m0618',
+        'pdf_url': 'https://insanvetoplum.org/content/6-sayilar/28-11-2/3-m0618/tirgil-aygun1.pdf',
+        'version': 'publishedVersion',
+        'host_type_set': 'publisher',
+        'evidence': 'oa journal (via doaj)',
+        'license': 'cc-by-nc-nd',
+    }
+
+    override_dict['10.12658/m0626'] = {
+        'metadata_url': 'https://insanvetoplum.org/en/issues/11-2/m0626',
+        'pdf_url': 'https://insanvetoplum.org/content/6-sayilar/28-11-2/8-m0626/ozcan-mercan.pdf',
+        'version': 'publishedVersion',
+        'host_type_set': 'publisher',
+        'evidence': 'oa journal (via doaj)',
+        'license': 'cc-by-nc-nd',
+    }
+
+    override_dict['10.12658/m0619'] = {
+        'metadata_url': 'https://insanvetoplum.org/en/issues/11-2/m0619',
+        'pdf_url': 'https://insanvetoplum.org/content/6-sayilar/28-11-2/4-m0619/valiyev.pdf',
+        'version': 'publishedVersion',
+        'host_type_set': 'publisher',
+        'evidence': 'oa journal (via doaj)',
+        'license': 'cc-by-nc-nd',
+    }
+
+    override_dict['10.12658/m0625'] = {
+        'metadata_url': 'https://insanvetoplum.org/en/issues/11-2/m0625',
+        'pdf_url': 'https://insanvetoplum.org/content/6-sayilar/28-11-2/7-m0625/yelpaze.pdf',
+        'version': 'publishedVersion',
+        'host_type_set': 'publisher',
+        'evidence': 'oa journal (via doaj)',
+        'license': 'cc-by-nc-nd',
+    }
+
+    override_dict['10.12658/m0610'] = {
+        'metadata_url': 'https://insanvetoplum.org/en/issues/11-2/m0610',
+        'pdf_url': 'https://insanvetoplum.org/content/6-sayilar/28-11-2/1-m0610/kizilkaya.pdf',
+        'version': 'publishedVersion',
+        'host_type_set': 'publisher',
+        'evidence': 'oa journal (via doaj)',
+        'license': 'cc-by-nc-nd',
+    }
+
+    # end ticket 23094
+
+    # ticket 23326. whole issue is on one page so can't scrape. but fix the one they asked about.
+    override_dict['10.31901/24566608.2020/71.1-3.3252'] = {
+        'metadata_url': 'https://doi.org/10.31901/24566608.2020/71.1-3.3252',
+        'pdf_url': 'http://krepublishers.com/02-Journals/JHE/JHE-71-0-000-20-Web/JHE-71-1-3-000-20-Abst-PDF/JHE-71-1-3-127-20-3252-Deepa-R/JHE-71-1-3-127-20-3252-Deepa-R-Tx[14].pdf',
+        'version': 'publishedVersion',
+        'host_type_set': 'publisher',
+        'evidence': 'oa journal (via observed oa rate)',
+    }
+
     override_dict['10.1080/1097198x.2020.1752084'] = {}
+
+    override_dict['10.1016/j.matpr.2020.09.186'] = {}  # ticket 23203
+
+    # ticket 22892, doi resolution is wrong
+    # is https://www.journalofhospitalmedicine.com/jhospmed/article/189543/hospital-medicine/you-cant-have-it-all-experience-academic-hospitalists
+    # should be https://www.journalofhospitalmedicine.com/jhospmed/article/189545/hospital-medicine/barriers-earlier-hospital-discharge-what-matters-most
+    override_dict['10.12788/jhm.3094'] = {}
 
     # ticket 535
     # book & chapters listed at https://www.brepolsonline.net/doi/book/10.1484/M.RELMIN-EB.6.09070802050003050502050201
-    for doi in ['10.1484/M.RELMIN-EB.6.09070802050003050502050201'] + map(
-        lambda n: '10.1484/M.RELMIN-EB.5.1038' + str(n), range(59, 76)
-    ):
+    for doi in ['10.1484/M.RELMIN-EB.6.09070802050003050502050201'] + ['10.1484/M.RELMIN-EB.5.1038' + str(n) for n in range(59, 76)]:
         override_dict[doi] = {
             "pdf_url": "https://www.doabooks.org/doab?func=fulltext&uiLanguage=en&rid=23027",
             "version": "publishedVersion",
@@ -962,9 +1162,7 @@ def get_overrides_dict():
         }
 
     # book & chapters listed at https://www.brepolsonline.net/doi/book/10.1484/M.RELMIN-EB.5.109256
-    for doi in ['10.1484/M.RELMIN-EB.5.109256'] + map(
-        lambda n: '10.1484/M.RELMIN-EB.5.1091' + str(n), range(58, 70)
-    ):
+    for doi in ['10.1484/M.RELMIN-EB.5.109256'] + list(['10.1484/M.RELMIN-EB.5.1091' + str(n) for n in range(58, 70)]):
         override_dict[doi] = {
             "pdf_url": "https://www.doabooks.org/doab?func=fulltext&uiLanguage=en&rid=26957",
             "version": "publishedVersion",
@@ -972,9 +1170,7 @@ def get_overrides_dict():
         }
 
     # book & chapters listed at https://www.brepolsonline.net/doi/book/10.1484/M.RELMIN-EB.5.108025
-    for doi in ['10.1484/M.RELMIN-EB.5.108025'] + map(
-        lambda n: '10.1484/M.RELMIN-EB.5.1084' + str(n), range(35, 51)
-    ):
+    for doi in ['10.1484/M.RELMIN-EB.5.108025'] + list(['10.1484/M.RELMIN-EB.5.1084' + str(n) for n in range(35, 51)]):
         override_dict[doi] = {
             "pdf_url": "https://www.doabooks.org/doab?func=fulltext&uiLanguage=en&rid=26953",
             "version": "publishedVersion",
@@ -982,9 +1178,7 @@ def get_overrides_dict():
         }
 
     # book & chapters listed at https://www.brepolsonline.net/doi/book/10.1484/M.RELMIN-EB.6.09070802050003050500050207
-    for doi in ['10.1484/M.RELMIN-EB.6.09070802050003050500050207'] + map(
-        lambda n: '10.1484/M.RELMIN-EB.1.1018' + str(n), range(74, 92)
-    ):
+    for doi in ['10.1484/M.RELMIN-EB.6.09070802050003050500050207'] + list(['10.1484/M.RELMIN-EB.1.1018' + str(n) for n in range(74, 92)]):
         override_dict[doi] = {
             "pdf_url": "https://www.doabooks.org/doab?func=fulltext&uiLanguage=en&rid=23029",
             "version": "publishedVersion",
@@ -992,9 +1186,7 @@ def get_overrides_dict():
         }
 
     # book & chapters listed at https://www.brepolsonline.net/doi/book/10.1484/M.RELMIN-EB.5.108940
-    for doi in ['10.1484/M.RELMIN-EB.5.108940'] + map(
-        lambda n: '10.1484/M.RELMIN-EB.5.1093' + str(n), range(46, 60)
-    ):
+    for doi in ['10.1484/M.RELMIN-EB.5.108940'] + list(['10.1484/M.RELMIN-EB.5.1093' + str(n) for n in range(46, 60)]):
         override_dict[doi] = {
             "pdf_url": "https://www.doabooks.org/doab?func=fulltext&uiLanguage=en&rid=26960",
             "version": "publishedVersion",
@@ -1002,9 +1194,7 @@ def get_overrides_dict():
         }
 
     # book & chapters listed at https://www.brepolsonline.net/doi/book/10.1484/M.RELMIN-EB.6.09070802050003050408050408
-    for doi in ['10.1484/M.RELMIN-EB.6.09070802050003050408050408'] + map(
-        lambda n: '10.1484/M.RELMIN-EB.1.1018' + str(n), range(10, 27)
-    ):
+    for doi in ['10.1484/M.RELMIN-EB.6.09070802050003050408050408'] + list(['10.1484/M.RELMIN-EB.1.1018' + str(n) for n in range(10, 27)]):
         override_dict[doi] = {
             "pdf_url": "https://www.doabooks.org/doab?func=fulltext&uiLanguage=en&rid=25736",
             "version": "publishedVersion",
@@ -1012,9 +1202,7 @@ def get_overrides_dict():
         }
 
     # book & chapters listed at https://www.brepolsonline.net/action/showBook?doi=10.1484%2FM.RELMIN-EB.5.106169
-    for doi in ['10.1484/M.RELMIN-EB.5.106169'] + map(
-        lambda n: '10.1484/M.RELMIN-EB.4.000' + str(n).zfill(2), range(2, 15)
-    ):
+    for doi in ['10.1484/M.RELMIN-EB.5.106169'] + list(['10.1484/M.RELMIN-EB.4.000' + str(n).zfill(2) for n in range(2, 15)]):
         override_dict[doi] = {
             "pdf_url": "https://www.doabooks.org/doab?func=fulltext&uiLanguage=en&rid=23028",
             "version": "publishedVersion",
@@ -1022,9 +1210,7 @@ def get_overrides_dict():
         }
 
     # book & chapters listed at https://www.brepolsonline.net/doi/book/10.1484/M.RELMIN-EB.5.109274
-    for doi in ['10.1484/M.RELMIN-EB.5.109274'] + map(
-        lambda n: '10.1484/M.RELMIN-EB.5.111' + str(n), range(590, 615)
-    ):
+    for doi in ['10.1484/M.RELMIN-EB.5.109274'] + list(['10.1484/M.RELMIN-EB.5.111' + str(n) for n in range(590, 615)]):
         override_dict[doi] = {
             "pdf_url": "https://www.doabooks.org/doab?func=fulltext&uiLanguage=en&rid=26954",
             "version": "publishedVersion",
@@ -1032,9 +1218,7 @@ def get_overrides_dict():
         }
 
     # book & chapters listed at https://www.brepolsonline.net/action/showBook?doi=10.1484/M.RELMIN-EB.5.112302
-    for doi in ['10.1484/M.RELMIN-EB.5.112302'] + map(
-        lambda n: '10.1484/M.RELMIN-EB.5.1115' + str(n), range(13, 29)
-    ):
+    for doi in ['10.1484/M.RELMIN-EB.5.112302'] + list(['10.1484/M.RELMIN-EB.5.1115' + str(n) for n in range(13, 29)]):
         override_dict[doi] = {
             "pdf_url": "https://www.doabooks.org/doab?func=fulltext&uiLanguage=en&rid=26961",
             "version": "publishedVersion",
@@ -1048,9 +1232,302 @@ def get_overrides_dict():
         "evidence": "oa repository (manual)"
     }
 
+    # ticket 23115
+    override_dict["10.3847/1538-4357/abfb62"] = {
+        "metadata_url": "https://doi.org/10.3847/1538-4357/abfb62",
+        "version": "publishedVersion",
+        "host_type_set": "publisher",
+        "evidence": "open (via page says license)",
+        "license": "cc-by",
+    }
+
+    # ticket 23357
+    override_dict["10.4314/tjpr.v19i2.20"] = {
+        "metadata_url": "https://www.tjpr.org/home/abstract.php?id=2776",
+        "version": "publishedVersion",
+        "host_type_set": "publisher",
+        "evidence": "oa journal (via doaj)",
+        "license": "cc-by",
+    }
+
+    # ticket 23365
+    override_dict["10.5604/01.3001.0015.0242"] = {
+        "metadata_url": "https://doi.org/10.5604/01.3001.0015.0242",
+        "pdf_url": "https://archivesmse.org/api/files/download/1678754.pdf",
+        "version": "publishedVersion",
+        "evidence": "open (via free pdf)",
+        "host_type_set": "publisher",
+    }
+
+    # ticket 23444
+    override_dict["10.1053/eupc.2001.0173"] = {
+        "metadata_url": "https://infoscience.epfl.ch/record/154915/files/2001_Seeck_EP_symptomatic%20postictal%20cardiac%20asystole%20in%20a%20young%20patient%20with%20parietal%20seizures.pdf",
+        "pdf_url": "https://infoscience.epfl.ch/record/154915/files/2001_Seeck_EP_symptomatic%20postictal%20cardiac%20asystole%20in%20a%20young%20patient%20with%20parietal%20seizures.pdf",
+        "version": "submittedVersion",
+        "evidence": "oa repository (via OAI-PMH doi match)",
+        "host_type_set": "repository"
+    }
+
+    # ticket 23479
+    override_dict["10.1002/14651858.cd011772.pub2"] = {
+        "metadata_url": "https://doi.org/10.1002/14651858.cd011772.pub2",
+        "version": "publishedVersion",
+        "host_type_set": "publisher"
+    }
+
+    # ticket 23654
+    override_dict["10.31901/24566772.2015/09.01.04"] = {
+        "metadata_url": "https://doi.org/10.31901/24566772.2015/09.01.04",
+        "pdf_url": "http://krepublishers.com/02-Journals/S-EM/EM-09-0-000-15-Web/S-EM-09-1-15-Abst-PDF/S-EM-9-1-025-339-15-Ekiyor-A/S-EM-9-1-025-339-15-Ekiyor-A-Tx%5B4%5D.pdf",
+        "version": "publishedVersion",
+        "host_type_set": "publisher"
+    }
+
+    # ticket 23751, broken DOI
+    override_dict["10.1016/s0185-2698(13)71815-4"] = {
+        "metadata_url": "https://www.sciencedirect.com/science/article/pii/S0185269813718154",
+        "version": "publishedVersion",
+        "evidence": "oa journal (via observed oa rate)",
+        "host_type_set": "publisher",
+    }
+
+    # ticket  23766, broken DOI
+    override_dict["10.5935/1676-2444.20170032"] = {
+        "metadata_url": "https://www.scielo.br/j/jbpml/a/wrvWHf6Tm78PxGpb8rHnTsN/?lang=en",
+        "version": "publishedVersion",
+        "evidence": "oa journal (via doaj)",
+        "license": "cc-by",
+        "host_type_set": "publisher",
+    }
+
+    # ticket 23864, broken DOI
+    override_dict["10.32604/jrm.2020.011462"] = {
+        "metadata_url": "https://www.techscience.com/jrm/v8n11/40268",
+        "version": "publishedVersion",
+        "evidence": "open (via page says license)",
+        "license": "cc-by",
+        "host_type_set": "publisher",
+    }
+
+    # ticket 23865, broken DOI
+    override_dict["10.32604/jrm.2020.011453"] = {
+        "metadata_url": "https://www.techscience.com/jrm/v8n11/40269",
+        "version": "publishedVersion",
+        "evidence": "open (via page says license)",
+        "license": "cc-by",
+        "host_type_set": "publisher",
+    }
+
+    # ticket 23940, licenced but not on publisher site
+    override_dict["10.1007/978-3-319-66659-4_4"] = {
+        "metadata_url": "https://hdl.handle.net/2043/26825",
+        "pdf_url": "https://mau.diva-portal.org/smash/get/diva2:1406951/FULLTEXT01.pdf",
+        "version": "publishedVersion",
+        "evidence": "oa repository (via OAI-PMH title and first author match)",
+        "license": "cc-by",
+        "host_type_set": "repository",
+    }
+
+    # ticket 23947
+    override_dict["10.4303/iep/e101203"] = {
+        "metadata_url": "https://www.omicsonline.org/open-access/gaseous-pollutants-formation-and-their-harmful-effects-on-health-and-environment.php?aid=15178",
+        "host_type_set": "publisher",
+        "evidence": "open (via page says license)",
+        "license": "cc-by",
+        "version": "publishedVersion",
+    }
+
+    # ticket 23975, need to find an OA label for this journal
+    override_dict["10.7202/1037312ar"] = {
+        "metadata_url": "https://doi.org/10.7202/1037312ar",
+        "host_type_set": "publisher",
+        "version": "publishedVersion",
+        "evidence": "open (via free article)",
+    }
+
+    # ticket 24006, page has license but it's not open
+    override_dict['10.1007/s12440-021-00141-1'] = {}
+
+    # ticket 24027
+    override_dict['10.1016/j.chb.2018.02.003'] = {
+        'metadata_url': 'https://www.researchgate.net/publication/323000147_Sexting_Among_Adolescents_A_Nuanced_and_Gendered_Online_Challenge_for_Young_People',
+        'host_type_set': 'repository',
+        'version': 'submittedVersion',
+        'evidence': 'oa repository (manual)'
+    }
+
+    # ticket 24066, correction uploaded to PMC but not to publisher
+    override_dict['10.20524/aog.2020.0518'] = {
+        'metadata_url': 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7406818',
+        'pdf_url': 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7406818/pdf/AnnGastroenterol-33-508.pdf',
+        'host_type_set': 'repository',
+        'evidence': 'oa repository (via pmcid lookup)',
+        'version': 'publishedVersion',
+    }
+
+    # ticket 24125, show preprint from SSRN
+    override_dict['10.1515/rle-2018-0067'] = {
+        'metadata_url': 'https://doi.org/10.2139/ssrn.3246929',
+        'host_type_set': 'repository',
+        'evidence': 'oa repository (manual)',
+        'version': 'submittedVersion',
+    }
+
+    # ticket 24109, wrong oa location
+    override_dict['10.1037/0033-295X.105.1.158'] = {}
+
+    # ticket 24096, wrong oa location
+    override_dict['10.1108/BFJ-04-2021-0416'] = {}
+
+    # ticket 24112, bad doi redirect
+    override_dict['10.35935/edr/26.2616'] = {}
+
+    # ticket 24120, incorrect oa location
+    override_dict['10.1007/978-3-030-13334-4'] = {}
+
+    # ticket 24207, incorrect oa location via repository
+    override_dict['10.1007/978-3-319-55898-1'] = {}
+
+    # ticket 24131, incorrect oa location via repository
+    override_dict['10.1068/a3999'] = {}
+
+    # ticket 24241, book chapter via repository
+    override_dict['10.1093/oxfordhb/9780198729570.001.0001'] = {}
+
+    # ticket 24204, found wrong pdf
+    override_dict['10.1086/503923'] = {}
+
+    # ticket 24204, found wrong pdf
+    override_dict['10.1515/9783110536553'] = {}
+
+    # ticket 24311, incorrect PDF via manuscript
+    override_dict['10.1016/j.nima.2019.03.095'] = {}
+
+    # ticket 24224, incorrect PDF via manuscript
+    override_dict['10.30649/denta.v11i2.98'] = {}
+
+    # ticket 24354, incorrect PDF file, should be closed
+    override_dict['10.1163/1570065054300275'] = {}
+
+    # ticket 24365, wrong location
+    override_dict['10.1001/archpsyc.1994.03950010008002'] = {}
+
+    # ticket 24316
+    override_dict["10.1063/1.1676828"] = {
+        "pdf_url": "https://aip.scitation.org/doi/pdf/10.1063/1.1676828",
+        "version": "publishedVersion",
+        "evidence": "open (via free pdf)",
+        "host_type_set": "publisher",
+    }
+    override_dict["10.1016/s2215-0366(21)00258-3"] = {
+        "pdf_url": "https://thelancet.com/action/showPdf?pii=S2215-0366%2821%2900258-3",
+        "version": "publishedVersion",
+        "evidence": "open (via free pdf)",
+        "host_type_set": "publisher",
+    }
+    override_dict["10.1002/catl.30714"] = {
+        "pdf_url": "https://onlinelibrary.wiley.com/doi/epdf/10.1002/catl.30714",
+        "version": "publishedVersion",
+        "evidence": "open (via free pdf)",
+        "host_type_set": "publisher",
+    }
+    override_dict["10.1016/j.jadohealth.2021.06.026"] = {
+        "pdf_url": "https://www.jahonline.org/action/showPdf?pii=S1054-139X%2821%2900339-6",
+        "version": "publishedVersion",
+        "evidence": "open (via free pdf)",
+        "host_type_set": "publisher",
+    }
+    override_dict["10.1139/bcb-2016-0211"] = {
+        "pdf_url": "https://cdnsciencepub.com/doi/pdf/10.1139/bcb-2016-0211",
+        "version": "publishedVersion",
+        "evidence": "open (via free pdf)",
+        "host_type_set": "publisher",
+    }
+    override_dict["10.1287/orsc.1060.0189"] = {
+        "pdf_url": "https://pubsonline.informs.org/doi/epdf/10.1287/orsc.1060.0189",
+        "version": "publishedVersion",
+        "evidence": "open (via free pdf)",
+        "host_type_set": "publisher",
+    }
+    override_dict["10.1517/14656566.2013.808011"] = {
+        "pdf_url": "https://www.tandfonline.com/doi/pdf/10.1517/14656566.2013.808011?needAccess=true",
+        "version": "publishedVersion",
+        "evidence": "open (via free pdf)",
+        "host_type_set": "publisher",
+    }
+    override_dict["10.4141/cjss72-065"] = {
+        "pdf_url": "https://cdnsciencepub.com/doi/pdf/10.4141/cjss72-065",
+        "version": "publishedVersion",
+        "evidence": "open (via free pdf)",
+        "host_type_set": "publisher",
+    }
+    override_dict["10.1142/s0217979290001157"] = {
+        "pdf_url": "https://www.worldscientific.com/doi/epdf/10.1142/S0217979290001157",
+        "version": "publishedVersion",
+        "evidence": "open (via free pdf)",
+        "host_type_set": "publisher",
+    }
+    override_dict["10.1063/1.444450"] = {
+        "pdf_url": "https://aip.scitation.org/doi/pdf/10.1063/1.444450",
+        "version": "publishedVersion",
+        "evidence": "open (via free pdf)",
+        "host_type_set": "publisher",
+    }
+    override_dict["10.1002/adma.201570284"] = {
+        "pdf_url": "https://onlinelibrary.wiley.com/doi/epdf/10.1002/adma.201570284",
+        "version": "publishedVersion",
+        "evidence": "open (via free pdf)",
+        "host_type_set": "publisher",
+    }
+
+    # ticket 24395
+    override_dict['10.4324/9781315212043'] = {}
+
+    # ticket 24224
+    override_dict['10.1007/978-88-470-3944-5'] = {}
+
+    # ticket 24427
+    override_dict['10.1007/978-3-030-69262-9'] = {}
+
+    # ticket 24426
+    override_dict['10.1007/978-981-15-0548-5'] = {}
+
+    # ticket 24501
+    override_dict['10.7312/negi14448'] = {}
+
+    # ticket 5656744
+    override_dict["10.3301/GFT.2010.01"] = {
+        "metadata_url": "https://www.isprambiente.gov.it/it/pubblicazioni/periodici-tecnici/geological-field-trips/an-itinerary-through-proterozoic-to-holocene-rocks",
+        "pdf_url": "https://www.isprambiente.gov.it/it/pubblicazioni/periodici-tecnici/geological-field-trips/resolveuid/95a7d4a397e4483b86299214b8351498",
+        "version": "publishedVersion",
+        "evidence": "open (via free pdf)",
+        "host_type_set": "publisher",
+    }
+
+    override_dict["10.3301/GFT.2009.01"] = {
+        "metadata_url": "https://www.isprambiente.gov.it/it/pubblicazioni/periodici-tecnici/geological-field-trips/the-laga-basin-stratigraphic-and-structural-setting",
+        "pdf_url": "https://www.isprambiente.gov.it/it/pubblicazioni/periodici-tecnici/geological-field-trips/resolveuid/c8c98c95c8374512bc5f4c057e4d6ba5",
+        "version": "publishedVersion",
+        "evidence": "open (via free pdf)",
+        "host_type_set": "publisher",
+    }
+
+    # ticket 24707
+    override_dict['10.1111/sjop.12361'] = {}
+
+    # ticket 24766
+    override_dict['10.1080/07448481.2020.1740231'] = {}
+
+    # ticket 24805
+    override_dict['10.1007/978-3-030-88773-5'] = {}
+
+    override_dict['10.1007/978-3-319-33228-4'] = {}
+
+    override_dict['10.2307/749877'] = {}
+
     # the use of this is counting on the doi keys being lowercase/cannonical
     response = {}
-    for k, v in override_dict.iteritems():
+    for k, v in override_dict.items():
         response[normalize_doi(k)] = v
 
     return response

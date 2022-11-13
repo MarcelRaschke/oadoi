@@ -1,36 +1,3 @@
-beautifulsoup4==4.7.1
+beautifulsoup4==4.9.3
 boto==2.49.0
-ddt==1.1.1
-executor==18.0
-Flask==0.10.1
-Flask-Compress==1.3.0
-Flask-DebugToolbar==0.10.0
-Flask-SQLAlchemy==2.2
-geoip2==2.5.0
-google-cloud-bigquery==1.8.1
-gspread==3.1.0
-gunicorn==19.9.0
-heroku3==3.3.0
-itsdangerous==0.24
-Jinja2==2.8
-kids.cache==0.0.7
-lxml==4.9.1
-mock==2.0.0
-nose==1.3.7
-oauth2client==4.1.3
-openpyxl==2.6.4
-pdfminer==20140328
-pdftotext==2.1.1
-psycopg2==2.7.3.2
-redis==3.3.8
-requests[security] == 2.18.4
-requests-cache==0.6.0.dev1
-sendgrid==5.3.0
-shortuuid==0.4.3
-Sickle==0.6.4
-slackclient==1.3.2
-unicodecsv==0.14.1
-unidecode==0.04.19
-Werkzeug==0.15.3
-requests>=2.20 # not directly required, pinned by Snyk to avoid a vulnerability
-urllib3>=1.26.5 # not directly required, pinned by Snyk to avoid a vulnerability
+

@@ -1,26 +1,15 @@
-from flask import Flask
-from flask_sqlalchemy import SQLAlchemy
-from flask_compress import Compress
-from flask_debugtoolbar import DebugToolbarExtension
-from sqlalchemy import exc, text
-from sqlalchemy import event
-from sqlalchemy.pool import NullPool
-from sqlalchemy.pool import Pool
-
 import logging
-import sys
 import os
-import requests
-import json
-import boto
-import random
+import sys
 import warnings
 
-from util import safe_commit
-from util import elapsed
-from util import HTTPMethodOverrideMiddleware
-
-
+import boto
+import requests
+from flask import Flask
+from flask_compress import Compress
+from flask_debugtoolbar import DebugToolbarExtension
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy.pool import NullPool
 
 HEROKU_APP_NAME = "oadoi"
 
@@ -46,7 +35,8 @@ libraries_to_mum = [
     "paramiko",
     "chardet",
     "cryptography",
-    "psycopg2"
+    "psycopg2",
+    "botocore",
 ]
 
 
@@ -64,7 +54,7 @@ app = Flask(__name__)
 
 # database stuff
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = True  # as instructed, to suppress warning
-app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL")
+app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL").replace('postgres://', 'postgresql://')
 app.config['SQLALCHEMY_ECHO'] = (os.getenv("SQLALCHEMY_ECHO", False) == "True")
 
 # from http://stackoverflow.com/a/12417346/596939
@@ -81,7 +71,7 @@ compress_json = os.getenv("COMPRESS_DEBUG", "False")=="True"
 
 # set up Flask-DebugToolbar
 if (os.getenv("FLASK_DEBUG", False) == "True"):
-    logger.info(u"Setting app.debug=True; Flask-DebugToolbar will display")
+    logger.info("Setting app.debug=True; Flask-DebugToolbar will display")
     compress_json = False
     app.debug = True
     app.config['DEBUG'] = True
@@ -133,29 +123,3 @@ s3_conn = boto.connect_s3(
 #         # connecting again up to three times before raising.
 #         raise exc.DisconnectionError()
 #     cursor.close()
-
-doaj_issns_with_hyphens = db.engine.execute(
-    text("""
-        select issn, license, year from filtered_doaj_journals where issn is not null
-        union all
-        select e_issn as issn, license, year from filtered_doaj_journals where e_issn is not null
-    """)
-).fetchall()
-
-# remove hyphens here so don't have to do it every time
-doaj_issns = []
-for row in doaj_issns_with_hyphens:
-    (row_issn_with_hyphen, row_license, doaj_start_year) = row
-    row_issn_no_hypen = row_issn_with_hyphen.replace("-", "")
-    doaj_issns.append([row_issn_no_hypen, row_license, doaj_start_year])
-
-doaj_titles = [
-    (title.encode("utf-8"), license, start_year) for (title, license, start_year) in
-    db.engine.execute(
-       text("""
-            select title, license, year from filtered_doaj_journals where title is not null
-            union all
-            select alt_title as title, license, year from filtered_doaj_journals where alt_title is not null
-        """)
-    ).fetchall()
-]

@@ -1,7 +1,7 @@
 from sqlalchemy.dialects.postgresql import JSONB
 
 from app import db
-from urllib import quote
+from urllib.parse import quote
 
 
 class Journal(db.Model):
@@ -13,20 +13,24 @@ class Journal(db.Model):
     embargo = db.Column(db.Interval)
     api_raw_crossref = db.Column(JSONB)
     api_raw_issn = db.Column(JSONB)
+    url = db.Column(db.Text)
 
     @property
     def home_page(self):
-        query = quote(u'{} {}'.format(self.title, self.issn_l).encode('utf-8'))
-        url = u'https://www.google.com/search?q={}'.format(query)
+        if self.url:
+            return self.url
+        else:
+            query = quote('{} {}'.format(self.title, self.issn_l).encode('utf-8'))
+            url = 'https://www.google.com/search?q={}'.format(query)
         return url
 
     def to_csv_row(self):
         row = []
         for attr in ["home_page", "publisher", "title"]:
-            value = getattr(self, attr) or u''
-            value = value.replace(u',', u'; ')
+            value = getattr(self, attr) or ''
+            value = value.replace(',', '; ')
             row.append(value)
-        csv_row = u','.join(row)
+        csv_row = ','.join(row)
         return csv_row
 
     def to_dict(self):
@@ -37,6 +41,6 @@ class Journal(db.Model):
         }
 
     def __repr__(self):
-        return u'<Journal ({issn_l}, {title})>'.format(
+        return '<Journal ({issn_l}, {title})>'.format(
             issn_l=self.issn_l, title=self.title
         )

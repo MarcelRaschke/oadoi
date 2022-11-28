@@ -34,6 +34,25 @@ lookup_raw = {
     "10.1038/nphoton.2017.32": [
         "https://iris.unibs.it/bitstream/11379/488968/1/10.1038%40nphoton.2017.32.pdf",
     ],
+    "10.1016/j.micromeso.2021.110909": [
+        "https://chemrxiv.org/ndownloader/files/22221642",
+        "https://s3-eu-west-1.amazonaws.com/itempdf74155353254prod/12073869/General_Cluster_Sorption_Isotherm_v1.pdf",
+    ],
+    "10.1007/s10530-016-1077-6": [
+      "http://dspace.stir.ac.uk/bitstream/1893/23086/1/Roy%20et%20al%202016%20Biol%20Cons%20Author%20Copy.pdf",  # ticket 23034
+    ],
+    "10.1126/science.abf8003": [
+        "https://doi.org/10.1126/science.abf8003"  # tickart 23050, license says it should be OA but it isn't
+    ],
+    "10.1136/bmj.g3387": [
+        "http://www.savetheharlanbeagles.com/ewExternalFiles/bmj-is-animal-research-sufficiently-evidenced-basede-tobea-cornerstone-of-biomedical-research.pdf"
+    ],
+    "10.1007/978-3-662-05094-1": [
+        "https://zenodo.org/record/4454681",
+    ],
+    "10.1007/978-3-662-44874-8": [
+        "https://zenodo.org/record/4454681",
+    ],
 }
 
 
@@ -53,7 +72,7 @@ def reported_noncompliant_url_fragments(dirty_doi):
         return []
 
     lookup_normalized = {}
-    for (doi_key, fragment_list) in lookup_raw.iteritems():
+    for (doi_key, fragment_list) in lookup_raw.items():
         lookup_normalized[normalize_doi(doi_key)] = [noncompliant_url_fragment.lower() for noncompliant_url_fragment in fragment_list]
 
     return lookup_normalized.get(normalize_doi(dirty_doi), [])

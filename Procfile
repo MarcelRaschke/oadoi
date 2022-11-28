@@ -5,12 +5,12 @@ web_dev: gunicorn views:app -w 2 --timeout 36000 --reload
 update: bash run_worker.sh
 refresh: bin/start-pgbouncer-stunnel bash run_hybrid_worker.sh
 refresh_aux: bin/start-pgbouncer-stunnel bash run_hybrid_worker_aux_0.sh
-refresh_aux_1: bin/start-pgbouncer-stunnel bash run_hybrid_worker_aux_1.sh
-run_date_range: bash run_dates_worker.sh
 run_pmh: bash run_pmh.sh
 run_repo: bash run_repo.sh
-run_page: bash run_page.sh
 run_pdf_url_check: bin/start-pgbouncer-stunnel bash run_pdf_url_check.sh
 green_scrape: bash run_green_scrape_worker.sh
 publisher_scrape: bash run_publisher_scrape_worker.sh
-heather_test: python queue_page.py --method=set_version_and_license --run --chunk=100
+repo_oa_location_export: python repo_oa_location_export.py
+pubmed_record_queue: bash run_pubmed_record_worker.sh
+pmh_rt_record_queue: bash run_pmh_rt_record_worker.sh
+doi_rt_record_queue: bash run_doi_rt_record_worker.sh

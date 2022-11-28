@@ -1,18 +1,18 @@
-import csv
-import os
-import json
-import gspread
 import datetime
+import json
+import os
 import re
+
+import gspread
 import unicodecsv as csv
 
 from app import db
-from util import safe_commit
-from emailer import send
 from emailer import create_email
+from emailer import send
 from endpoint import Endpoint
-from repository import Repository
 from repo_request import RepoRequest
+from repository import Repository
+from util import safe_commit
 
 
 def get_repo_request_rows():
@@ -62,7 +62,7 @@ def save_repo_request_rows(rows):
                     column_num += 1
 
             w.writerow(my_repo_request.to_dict())
-            print u"adding repo request {}".format(my_repo_request)
+            print("adding repo request {}".format(my_repo_request))
             db.session.merge(my_repo_request)
 
         safe_commit(db)
@@ -75,15 +75,15 @@ def add_endpoint(my_request):
 
     endpoint_with_this_id = Endpoint.query.filter(Endpoint.repo_request_id==my_request.id).first()
     if endpoint_with_this_id:
-        print u"one already matches {}".format(my_request.id)
+        print("one already matches {}".format(my_request.id))
         return None
 
     raw_endpoint = my_request.pmh_url
     clean_endpoint = raw_endpoint.strip()
     clean_endpoint = clean_endpoint.strip("?")
-    clean_endpoint = re.sub(u"\?verb=.*$", "", clean_endpoint, re.IGNORECASE)
-    clean_endpoint = re.sub(u"^https?://api\.unpaywall\.org/repository/endpoint/test/", "", clean_endpoint, re.IGNORECASE)
-    print u"raw endpoint is {}, clean endpoint is {}".format(raw_endpoint, clean_endpoint)
+    clean_endpoint = re.sub("\?verb=.*$", "", clean_endpoint, re.IGNORECASE)
+    clean_endpoint = re.sub("^https?://api\.unpaywall\.org/repository/endpoint/test/", "", clean_endpoint, re.IGNORECASE)
+    print("raw endpoint is {}, clean endpoint is {}".format(raw_endpoint, clean_endpoint))
 
     matching_endpoint = Endpoint()
     matching_endpoint.pmh_url = clean_endpoint
@@ -91,11 +91,11 @@ def add_endpoint(my_request):
     repo_matches = my_request.matching_repositories()
     if repo_matches:
         matching_repo = repo_matches[0]
-        print u"yay! for {} {} matches repository {}".format(
-            my_request.institution_name, my_request.repo_name, matching_repo)
+        print("yay! for {} {} matches repository {}".format(
+            my_request.institution_name, my_request.repo_name, matching_repo))
     else:
-        print u"no matching repository for {}: {}".format(
-            my_request.institution_name, my_request.repo_name)
+        print("no matching repository for {}: {}".format(
+            my_request.institution_name, my_request.repo_name))
         matching_repo = Repository()
 
     # overwrite stuff with request
@@ -106,16 +106,21 @@ def add_endpoint(my_request):
     matching_endpoint.email = my_request.email
     matching_endpoint.repo_request_id = my_request.id
     matching_endpoint.ready_to_run = True
+    matching_endpoint.pmh_set = my_request.pmh_set or None
+
+    if my_request.metadata_prefix:
+        matching_endpoint.metadata_prefix = my_request.metadata_prefix
+
     matching_endpoint.set_identify_and_initial_query()
 
     db.session.merge(matching_endpoint)
     db.session.merge(matching_repo)
-    print u"added {} {}".format(matching_endpoint, matching_repo)
-    print u"see at url http://unpaywall.org/sources/repository/{}".format(matching_endpoint.id)
+    print("added {} {}".format(matching_endpoint, matching_repo))
+    print("see at url http://unpaywall.org/sources/repository/{}".format(matching_endpoint.id))
     safe_commit(db)
-    print "saved"
+    print("saved")
 
-    print "now sending email"
+    print("now sending email")
     # get the endpoint again, so it gets with all the meta info etc
     matching_endpoint = Endpoint.query.get(matching_endpoint.id)
     matching_endpoint.contacted_text = "automated welcome email"
@@ -123,7 +128,7 @@ def add_endpoint(my_request):
     safe_commit(db)
     send_announcement_email(matching_endpoint)
 
-    print "email sent"
+    print("email sent")
 
     return matching_endpoint
 
@@ -133,7 +138,7 @@ def send_announcement_email(my_endpoint):
     email_address = my_endpoint.email
     repo_name = my_endpoint.repo.repository_name
     institution_name = my_endpoint.repo.institution_name
-    print my_endpoint_id, email_address, repo_name, institution_name
+    print(my_endpoint_id, email_address, repo_name, institution_name)
     # prep email
     email = create_email(email_address,
                  "Update on your Unpaywall indexing request (ref: {} )".format(my_endpoint_id),

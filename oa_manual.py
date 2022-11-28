@@ -1525,6 +1525,40 @@ def get_overrides_dict():
 
     override_dict['10.2307/749877'] = {}
 
+    override_dict["10.1039/c5nr02694f"] = {
+        "pdf_url": "http://ir.qibebt.ac.cn/bitstream/337004/6456/1/A%20V2O3-ordered%20mesoporous%20carbon%20composite%20with%20novel%20peroxidase-like%20activity%20towards%20the%20glucose%20colorimetric%20assay%e2%80%a0.pdf",
+        "version": "publishedVersion",
+        "host_type_set": "repository"
+    }
+
+    override_dict['10.7551/mitpress/10413.001.0001'] = {}
+
+    override_dict['10.1002/pfi.4140410512'] = {}
+
+    override_dict['10.1038/nclimate2301'] = {}
+
+    override_dict['10.5840/studphaen20141411'] = {}
+
+    override_dict["10.1007/978-0-387-93837-0"] = {}
+
+    override_dict["10.1108/RPJ-02-2021-0039"] = {}
+
+    override_dict["10.1007/978-3-642-34435-0"] = {
+        "pdf_url": "https://link.springer.com/content/pdf/10.1007/978-3-642-34435-0.pdf",
+        "version": "submittedVersion",
+        "host_type_set": "repository"
+    }
+    override_dict["10.1007/978-3-662-45529-6"] = {
+        "pdf_url": "https://link.springer.com/content/pdf/10.1007/978-3-662-45529-6.pdf",
+        "version": "submittedVersion",
+        "host_type_set": "repository"
+    }
+    override_dict["10.1007/978-3-662-59192-5"] = {
+        "pdf_url": "https://link.springer.com/content/pdf/10.1007/978-3-662-59192-5.pdf",
+        "version": "submittedVersion",
+        "host_type_set": "repository"
+    }
+
     # the use of this is counting on the doi keys being lowercase/cannonical
     response = {}
     for k, v in override_dict.items():

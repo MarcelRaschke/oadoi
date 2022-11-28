@@ -577,6 +577,7 @@ def fix_url_scheme(url):
         'jurnal.asmtb.ac.id',
         'journals.linguisticsociety.org',
         'publicatio.bibl.u-szeged.hu',
+        'edarxiv.org'
     ]:
         sub_https = True
 
@@ -587,6 +588,7 @@ def fix_url_scheme(url):
         url = re.sub(r'^http://', 'https://', url)
 
     return url
+
 
 def run_sql(db, q):
     q = q.strip()

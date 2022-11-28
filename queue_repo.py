@@ -1,29 +1,22 @@
-import os
 import argparse
-from time import time
-from time import sleep
-from sqlalchemy import sql
-from sqlalchemy import exc
-from subprocess import call
-from sqlalchemy import text
-from sqlalchemy import orm
-import heroku3
-from pprint import pprint
-import datetime
-from random import shuffle
-import endpoint # magic
-import pmh_record # more magic
-import pub # thanks i hate it
 import logging
+import os
+from random import shuffle
+from time import sleep
+from time import time
+
+from sqlalchemy import text
+
+import endpoint # magic
+import pmh_record # magic
+import pub # magic
 
 from app import db
 from app import logger
-
+from endpoint import Endpoint
 from queue_main import DbQueue
-from util import elapsed
 from util import safe_commit
 
-from endpoint import Endpoint
 
 class DbQueueRepo(DbQueue):
     def table_name(self, job_type):
@@ -46,13 +39,13 @@ class DbQueueRepo(DbQueue):
             my_endpoint.run_diagnostics()
             db.session.merge(my_endpoint)
             safe_commit(db)
-            logger.info(u"merged and committed my_endpoint: {}".format(my_endpoint))
+            logger.info("merged and committed my_endpoint: {}".format(my_endpoint))
 
     def add_pmh_record(self, **kwargs):
         endpoint_id = kwargs.get("id", None)
         record_id = kwargs.get("recordid")
         my_repo = Endpoint.query.get(endpoint_id)
-        print "my_repo", my_repo
+        print("my_repo", my_repo)
         my_pmh_record = my_repo.get_pmh_record(record_id)
         my_pmh_record.mint_pages()
 
@@ -61,6 +54,8 @@ class DbQueueRepo(DbQueue):
         #     my_page.scrape()
         my_pmh_record.delete_old_record()
         db.session.merge(my_pmh_record)
+        db.session.flush()
+        my_pmh_record.enqueue_representative_page()
         # print my_pmh_record.pages
 
         safe_commit(db)
@@ -78,11 +73,16 @@ class DbQueueRepo(DbQueue):
 
         if not single_obj_id:
             text_query_pattern = """WITH picked_from_queue AS (
-                        SELECT *
+                        SELECT id
                         FROM   {queue_table}
                         WHERE (
                             most_recent_year_harvested is null
-                            or (most_recent_year_harvested < (now() at time zone 'utc')::date - interval '1 day')
+                            or (
+                                most_recent_year_harvested + interval '1 day'
+                                < now() at time zone 'utc'
+                                - interval '1 day' -- wait until most_recent_year_harvested is over 1 day ago
+                                - rand * interval '18 hours' -- plus an offset so we don't run everything at midnight
+                            )
                         )
                         and (
                             last_harvest_started is null
@@ -110,8 +110,7 @@ class DbQueueRepo(DbQueue):
                 chunk=chunk,
                 queue_table=queue_table
             )
-            logger.info(u"the queue query is:\n{}".format(text_query))
-
+            logger.info("the queue query is:\n{}".format(text_query))
 
         index = 0
         start_time = time()
@@ -120,18 +119,18 @@ class DbQueueRepo(DbQueue):
             if single_obj_id:
                 objects = [run_class.query.filter(run_class.id == single_obj_id).first()]
             else:
-                # logger.info(u"looking for new jobs")
-                objects = run_class.query.from_statement(text(text_query)).all()
+                endpoint_id_rows = db.engine.execute(text(text_query).execution_options(autocommit=True)).fetchall()
+                endpoint_ids = [row[0] for row in endpoint_id_rows]
+
+                objects = db.session.query(run_class).filter(run_class.id.in_(endpoint_ids)).all()
                 db.session.commit()
-                # logger.info(u"finished get-new-objects query in {} seconds".format(elapsed(new_loop_start_time)))
 
             if not objects:
-                # logger.info(u"sleeping for 5 seconds, then going again")
+                logger.info("none ready, sleeping for 5 seconds, then going again")
                 sleep(5)
                 continue
 
-            object_ids = [obj.id for obj in objects]
-            print "run_method", run_method
+            print("run_method", run_method)
             self.update_fn(run_class, run_method, objects, index=index)
 
             # finished is set in update_fn
@@ -202,4 +201,4 @@ if __name__ == "__main__":
     job_type = "normal"  #should be an object attribute
     my_queue = DbQueueRepo()
     my_queue.run_right_thing(parsed_args, job_type)
-    print "finished"
+    print("finished")

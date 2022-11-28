@@ -33,7 +33,7 @@ def valid_changefile_api_keys():
     ).fetchall()]
 
 
-def get_file_from_bucket(filename, api_key, feed=WEEKLY_FEED):
+def get_file_from_bucket(filename, feed=WEEKLY_FEED):
     s3 = boto.connect_s3()
     bucket = s3.get_bucket(feed['bucket'])
     key = bucket.lookup(filename)
@@ -45,4 +45,4 @@ def get_changefile_dicts(api_key, feed=WEEKLY_FEED):
         sql.text(u'select changefile_dicts from changefile_dicts where feed = :feed').bindparams(feed=feed['name'])
     ).fetchone()[0]
 
-    return json.loads(response_dict.replace('__DATA_FEED_API_KEY__', api_key))
+    return json.loads(response_dict.replace('__DATA_FEED_API_KEY__', json.dumps(api_key)[1:-1]))

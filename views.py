@@ -1,66 +1,62 @@
+import json
+import os
+import re
+import sys
+from collections import defaultdict, OrderedDict
+from datetime import date, datetime, timedelta
+from time import time
+
 import boto
-from flask import current_app
-from flask import make_response
-from flask import request
-from flask import redirect
-from flask import abort
-from flask import render_template
-from flask import jsonify
-from flask import g
-from flask import url_for
+import redis
+import unicodecsv
 from flask import Response
+from flask import abort
+from flask import current_app
+from flask import g
+from flask import jsonify
+from flask import make_response
+from flask import redirect
+from flask import render_template
+from flask import request
+from flask import url_for
 from openpyxl import Workbook
 from sqlalchemy import sql
 from sqlalchemy.orm import raiseload
-
-import json
-import os
-import random
-import re
-import sys
-import requests
-from time import time
-from time import sleep
-from datetime import date, datetime, timedelta
-import unicodecsv
-from io import BytesIO
-from collections import defaultdict
-
-from app import app
-from app import db
-from app import logger
+from urllib.parse import quote
 
 import journal_export
 import pub
 import repository
-from accuracy_report import AccuracyReport
+from app import app
+from app import db
+from app import logger
+from changefile import DAILY_FEED, WEEKLY_FEED
+from changefile import get_changefile_dicts
+from changefile import get_file_from_bucket
+from changefile import valid_changefile_api_keys
 from emailer import create_email
 from emailer import send
-from search import fulltext_search_title
-from search import autocomplete_phrases
-from changefile import get_changefile_dicts
-from changefile import valid_changefile_api_keys
-from changefile import get_file_from_bucket
-from changefile import DAILY_FEED, WEEKLY_FEED
 from endpoint import Endpoint
 from endpoint import lookup_endpoint_by_pmh_url
-from repository import Repository
-from repo_request import RepoRequest
-from repo_pulse import BqRepoPulse
 from monitoring.error_reporting import handle_papertrail_alert
-from pmh_record import PmhRecord
+from page import LANDING_PAGE_ARCHIVE_BUCKET as REPO_PAGE_ARCHIVE_BUCKET
 from page import PageNew
+from pmh_record import PmhRecord
 from put_repo_requests_in_db import add_endpoint
+from recordthresher.pubmed import PubmedRaw
+from repo_oa_location_export_request import RepoOALocationExportRequest
+from repo_pulse import BqRepoPulse
+from repo_request import RepoRequest
+from repository import Repository
+from search import autocomplete_phrases
+from search import fulltext_search_title
 from snapshot import get_daily_snapshot_key
+from static_api_response import StaticAPIResponse
 from util import NoDoiException
-from util import safe_commit
-from util import elapsed
-from util import clamp
 from util import clean_doi, normalize_doi
+from util import elapsed
 from util import restart_dynos
-from util import get_sql_answers
 from util import str_to_bool
-
 
 
 def json_dumper(obj):
@@ -78,7 +74,7 @@ def json_resp(thing):
     json_str = json.dumps(thing, sort_keys=True, default=json_dumper, indent=4)
 
     if request.path.endswith(".json") and (os.getenv("FLASK_DEBUG", False) == "True"):
-        logger.info(u"rendering output through debug_api.html template")
+        logger.info("rendering output through debug_api.html template")
         resp = make_response(render_template(
             'debug_api.html',
             data=json_str))
@@ -155,7 +151,7 @@ def log_request(resp):
             }
 
     if log_dict:
-        logger.info(u"logthis: {}".format(json.dumps(log_dict)))
+        logger.info("logthis: {}".format(json.dumps(log_dict)))
 
 
 @app.after_request
@@ -178,7 +174,6 @@ def after_request_stuff(resp):
     return resp
 
 
-
 @app.before_request
 def stuff_before_request():
     if request.endpoint in ["get_doi_endpoint_v2", "get_doi_endpoint", "get_search_query"]:
@@ -191,14 +186,16 @@ def stuff_before_request():
         else:
             if not email:
                 abort_json(422, "Email address required in API call, see http://unpaywall.org/products/api")
-            if (email.endswith(u"example.com") and email != u"unpaywall_00@example.com") or email == u"YOUR_EMAIL":
+            if (email.endswith("example.com") and email != "unpaywall_01@example.com") or email == "YOUR_EMAIL":
                 abort_json(422, "Please use your own email address in API calls. See http://unpaywall.org/products/api")
 
             placeholder_emails = [
-                (ur'^email@email\.com$', date(2021, 2, 18)),
-                (ur'^your@email\.org$', date(2021, 2, 18)),
-                (ur'^[^@]+$', date(2021, 2, 18)),
-                (ur'^enter-your-email@your-institution-domain\.edu$', date(2021, 2, 18)),
+                (r'^email@.*email\.com$', date(2021, 2, 18)),
+                (r'^your@email\.org$', date(2021, 2, 18)),
+                (r'^[^@]+$', date(2021, 2, 18)),
+                (r'^enter-your-email@your-institution-domain\.edu$', date(2021, 2, 18)),
+                (r'randomEmail', date(1970, 1, 1)),
+                (r'^your.email@e?mail\.*', date(1970, 1, 1)),
             ]
 
             for placeholder_email, block_date in placeholder_emails:
@@ -213,16 +210,41 @@ def stuff_before_request():
                             "Please use your own email address in API calls. See http://unpaywall.org/products/api"
                         )
 
+            ip = get_ip()
 
+            try:
+                too_many_emails = too_many_emails_per_ip(ip, email)
+            except Exception as e:
+                logger.exception(f'error in email rate limiting: {e}')
+                too_many_emails = False
 
-    if get_ip() in ["35.200.160.130", "45.249.247.101", "137.120.7.33",
-                    "52.56.108.147", "193.137.134.252", "130.225.74.231"]:
+            if too_many_emails:
+                logger.info(f"too many emails for {ip}, {email}")
+
+                if re.match(r'^[A-Za-z0-9]{10}@gmail\.com$', email):
+                    logger.info(f"returning 422 for {email}")
+
+                    abort_json(422, (
+                        "It looks like you're using many email addresses to call the API as part of the same product. "
+                        "Please use a single working address "
+                        "and observe the rate limit of 100,000 calls per day (https://unpaywall.org/products/api). "
+                        "If your use case doesn't fit within these limits, "
+                        "please consider the database snapshot (https://unpaywall.org/products/snapshot) "
+                        "or the data feed (https://unpaywall.org/products/data-feed) "
+                        "and help us keep the API available for free. "
+                        "Get in touch with us at support@unpaywall.org to see how we can help."
+                    ))
+
+    if get_ip() in [
+        "35.200.160.130", "45.249.247.101",  "137.120.7.33",
+        "52.56.108.147",  "193.137.134.252", "130.225.74.231"
+    ]:
         abort_json(429, "History of API use exceeding rate limits, please email support@unpaywall.org for other data access options, including free full database dump.")
 
     g.request_start_time = time()
-    g.hybrid = 'hybrid' in request.args.keys()
+    g.hybrid = 'hybrid' in list(request.args.keys())
     if g.hybrid:
-        logger.info(u"GOT HYBRID PARAM so will run with hybrid.")
+        logger.info("GOT HYBRID PARAM so will run with hybrid.")
 
     # don't redirect http api in some cases
     if request.url.startswith("http://api."):
@@ -247,12 +269,48 @@ def stuff_before_request():
             "https://www.oadoi.org",
             "https://oadoi.org"
         )
-        logger.info(u"URL starts with www; redirecting to " + new_url)
+        logger.info("URL starts with www; redirecting to " + new_url)
 
     if new_url:
         return redirect(new_url, 301)  # permanent
 
 
+def too_many_emails_per_ip(ip, email):
+    redis_client = get_redis_client()
+
+    if not redis_client:
+        return False
+
+    max_emails_per_ip = 20
+    window_seconds = 300
+
+    redis_key = f'v2-api-ip-emails:{ip}'
+
+    redis_client.zremrangebyscore(redis_key, 0, time() - window_seconds)
+    redis_client.zadd(redis_key, {email: time()})
+    redis_client.expire(redis_key, window_seconds)
+
+    emails_per_ip = redis_client.zcard(redis_key)
+
+    return emails_per_ip > max_emails_per_ip
+
+
+_redis_client = None
+_redis_init = False
+
+
+def get_redis_client():
+    global _redis_client, _redis_init
+
+    if not _redis_init:
+        try:
+            _redis_client = redis.from_url(os.environ.get("REDIS_URL"), max_connections=1)
+        except Exception as e:
+            logger.exception(f'failed creating redis client: {e}')
+
+        _redis_init = True
+
+    return _redis_client
 
 # convenience function because we do this in multiple places
 def get_multiple_pubs_response():
@@ -267,7 +325,7 @@ def get_multiple_pubs_response():
             is_person_who_is_making_too_many_requests = True
         for doi in body["dois"]:
             biblios += [{"doi": doi}]
-            if u"jama" in doi:
+            if "jama" in doi:
                 is_person_who_is_making_too_many_requests = True
 
     elif "biblios" in body:
@@ -277,12 +335,12 @@ def get_multiple_pubs_response():
         if len(body["biblios"]) > 1:
             is_person_who_is_making_too_many_requests = True
 
-    logger.info(u"in get_multiple_pubs_response with {}".format(biblios))
+    logger.info("in get_multiple_pubs_response with {}".format(biblios))
 
     run_with_hybrid = g.hybrid
     if is_person_who_is_making_too_many_requests:
-        logger.info(u"is_person_who_is_making_too_many_requests, so returning 429")
-        abort_json(429, u"sorry, you are calling us too quickly.  Please email support@unpaywall.org so we can figure out a good way to get you the data you are looking for.")
+        logger.info("is_person_who_is_making_too_many_requests, so returning 429")
+        abort_json(429, "sorry, you are calling us too quickly.  Please email support@unpaywall.org so we can figure out a good way to get you the data you are looking for.")
     pubs = pub.get_pubs_from_biblio(biblios, run_with_hybrid)
     return pubs
 
@@ -296,16 +354,16 @@ def get_pub_from_doi(doi):
                                          skip_all_hybrid=skip_all_hybrid
                                          )
     except NoDoiException:
-        msg = u"'{}' isn't in Unpaywall. ".format(doi)
-        if re.search(ur'^10/[a-zA-Z0-9]+', doi):
-            msg += u'shortDOIs are not currently supported. '
-        msg += u'See https://support.unpaywall.org/a/solutions/articles/44001900286'
-        abort_json(404, msg)
+        msg = "'{}' isn't in Unpaywall. ".format(doi)
+        if re.search(r'^10/[a-zA-Z0-9]+', doi):
+            msg += 'shortDOIs are not currently supported. '
+        msg += 'See https://support.unpaywall.org/a/solutions/articles/44001900286'
+        raise NoDoiException(msg)
     return my_pub
 
 @app.route("/repo_pulse/endpoint/institution/<repo_name>", methods=["GET"])
 def get_repo_pulse_search_endpoint(repo_name):
-    my_repo = Repository.query.filter(Repository.institution_name.ilike(u"%{}%".format(repo_name))).first()
+    my_repo = Repository.query.filter(Repository.institution_name.ilike("%{}%".format(repo_name))).first()
     my_endpoint = my_repo.endpoints[0]
     endpoint_id = my_endpoint.id
     return get_repo_pulse_endpoint(endpoint_id)
@@ -406,6 +464,34 @@ def debug_repo_endpoint_search(query_string):
     return jsonify({"results": [obj.to_dict() for obj in endpoints]})
 
 
+@app.route("/repo_pulse/endpoint/<endpoint_id>/request_oa_locations", methods=["POST"])
+def repo_oa_location_request(endpoint_id):
+    body = request.json
+    email_address = body["email"]
+
+    export_request = RepoOALocationExportRequest.query.filter(
+        RepoOALocationExportRequest.email == email_address,
+        RepoOALocationExportRequest.endpoint_id == endpoint_id,
+        RepoOALocationExportRequest.finished == None
+    ).first()
+
+    if not export_request:
+        export_request = RepoOALocationExportRequest(
+            endpoint_id=endpoint_id,
+            requested=datetime.utcnow(),
+            email=email_address
+        )
+
+        db.session.merge(export_request)
+        db.session.commit()
+
+    return jsonify({
+        'endpoint_id': export_request.endpoint_id,
+        'requested': export_request.requested,
+        'email': export_request.email
+    })
+
+
 def get_endpoints_from_query_string(query_string):
     if "," in query_string:
         repo_ids = query_string.split(",")
@@ -443,7 +529,7 @@ def sources_endpoint_search(query_string):
 @app.route("/data/sources.csv", methods=["GET"])
 def sources_endpoint_csv():
     objs = repository.get_sources_data()
-    data_string = u'\n'.join([obj.to_csv_row() for obj in objs])
+    data_string = '\n'.join([obj.to_csv_row() for obj in objs])
     data_string = data_string.encode("utf-8")
     output = make_response(data_string)
     output.headers["Content-Disposition"] = "attachment; filename=unpaywall_sources.csv"
@@ -466,9 +552,11 @@ def repositories_endpoint():
 @app.route("/v1/publication/doi/<path:doi>", methods=["GET"])
 @app.route("/v1/publication/doi.json/<path:doi>", methods=["GET"])
 def get_from_new_doi_endpoint(doi):
-    my_pub = get_pub_from_doi(doi)
-    return jsonify({"results": [my_pub.to_dict_v1()]})
-
+    try:
+        my_pub = get_pub_from_doi(doi)
+        return jsonify({"results": [my_pub.to_dict_v1()]})
+    except NoDoiException as e:
+        abort_json(404, str(e))
 
 
 def get_ip():
@@ -482,7 +570,7 @@ def get_ip():
 
 def print_ip():
     user_agent = request.headers.get('User-Agent')
-    logger.info(u"calling from IP {ip}. User-Agent is '{user_agent}'.".format(
+    logger.info("calling from IP {ip}. User-Agent is '{user_agent}'.".format(
         ip=get_ip(),
         user_agent=user_agent
     ))
@@ -512,7 +600,7 @@ def new_post_publications_endpoint():
 @app.route("/v1/publication.json", methods=["GET"])
 def get_from_biblio_endpoint():
     request_biblio = {}
-    for (k, v) in request.args.iteritems():
+    for (k, v) in request.args.items():
         request_biblio[k] = v
     run_with_hybrid = g.hybrid
     my_pub = pub.get_pub_from_biblio(request_biblio, run_with_hybrid=run_with_hybrid)
@@ -567,15 +655,25 @@ def base_endpoint_v2():
 
 @app.route("/<path:doi>", methods=["GET"])
 def get_doi_endpoint(doi):
-    # the GET api endpoint (returns json data)
-    my_pub = get_pub_from_doi(doi)
-    return jsonify({"results": [my_pub.to_dict_v1()]})
+    return get_doi_endpoint_v2(doi)
 
 @app.route("/v2/<path:doi>", methods=["GET"])
 def get_doi_endpoint_v2(doi):
     # the GET api endpoint (returns json data)
-    my_pub = get_pub_from_doi(doi)
-    answer = my_pub.to_dict_v2()
+    try:
+        my_pub = get_pub_from_doi(doi)
+        answer = my_pub.to_dict_v2()
+    except NoDoiException as e:
+        answer = {}
+        normalized_doi = normalize_doi(doi, return_none_if_error=True)
+        if normalized_doi:
+            static_response = StaticAPIResponse.query.get(doi)
+            if static_response:
+                answer = OrderedDict([
+                    (key, static_response.response_jsonb.get(key, None)) for key in pub.Pub.dict_v2_fields().keys()
+                ])
+        if not answer:
+            abort_json(404, str(e))
 
     indent = None
     if current_app.config['JSONIFY_PRETTYPRINT_REGULAR'] and not request.is_xhr:
@@ -583,51 +681,35 @@ def get_doi_endpoint_v2(doi):
 
     return current_app.response_class(json.dumps(answer, indent=indent), mimetype='application/json')
 
+
 @app.route("/v2/dois", methods=["POST"])
 def simple_query_tool():
     body = request.json
-    dirty_dois_list = {d for d in body["dois"] if d}
+    dirty_dois_list = [d for d in body["dois"] if d]
 
     # look up normalized dois
-    normalized_dois = [
-        c for c in [normalize_doi(d, return_none_if_error=True) for d in dirty_dois_list] if c
+    normalized_dois = [n for n in [normalize_doi(d, return_none_if_error=True) for d in dirty_dois_list] if n]
+    q = db.session.query(pub.Pub.response_jsonb).filter(pub.Pub.id.in_(set(normalized_dois)))
+    normalized_doi_responses = dict([(row[0]['doi'], row[0]) for row in q.all() if row[0]])
+
+    # look up cleaned dois
+    cleaned_dois = [c for c in [clean_doi(d, return_none_if_error=True) for d in dirty_dois_list] if c]
+    q = db.session.query(pub.Pub.response_jsonb).filter(pub.Pub.id.in_(set(cleaned_dois)))
+    cleaned_doi_responses = dict([(row[0]['doi'], row[0]) for row in q.all() if row[0]])
+
+    responses = [
+        normalized_doi_responses.get(normalize_doi(d, return_none_if_error=True), None)
+        or cleaned_doi_responses.get(clean_doi(d, return_none_if_error=True), None)
+        or pub.build_new_pub(d, None).to_dict_v2()
+        for d in dirty_dois_list
     ]
-
-    q = db.session.query(pub.Pub.response_jsonb).filter(pub.Pub.id.in_(normalized_dois))
-    rows = q.all()
-
-    normalized_doi_responses = [row[0] for row in rows if row[0]]
-    found_normalized_dois = [r['doi'] for r in normalized_doi_responses]
-    missing_dois = [
-        d for d in dirty_dois_list
-        if normalize_doi(d, return_none_if_error=True) not in found_normalized_dois
-    ]
-
-    # look up cleaned dois where normalization wasn't enough
-    clean_dois = [c for c in [
-        clean_doi(d, return_none_if_error=True) for d in missing_dois
-    ] if c and c not in found_normalized_dois]
-
-    q = db.session.query(pub.Pub.response_jsonb).filter(pub.Pub.id.in_(clean_dois))
-    rows = q.all()
-
-    clean_doi_responses = [row[0] for row in rows if row[0]]
-    found_clean_dois = [r['doi'] for r in clean_doi_responses]
-    missing_dois = [
-        d for d in missing_dois
-        if clean_doi(d, return_none_if_error=True) not in found_normalized_dois + found_clean_dois
-    ]
-
-    placeholder_responses = [pub.build_new_pub(d, None).to_dict_v2() for d in missing_dois]
-
-    responses = normalized_doi_responses + clean_doi_responses + placeholder_responses
 
     formats = body.get("formats", []) or ["jsonl", "csv"]
     files = []
 
     if "jsonl" in formats:
         # save jsonl
-        with open("output.jsonl", 'wb') as f:
+        with open("output.jsonl", 'w') as f:
             for response_jsonb in responses:
                 f.write(json.dumps(response_jsonb, sort_keys=True))
                 f.write("\n")
@@ -673,7 +755,7 @@ def simple_query_tool():
 
     return jsonify({
         "got it": email_address,
-        "dois": found_normalized_dois + found_clean_dois + missing_dois
+        "dois": [r['doi'] for r in responses]
     })
 
 
@@ -721,6 +803,11 @@ def get_journal_extension_requests():
     return get_s3_csv_gz(journal_export.get_journal_file_key(journal_export.REQUESTS_FILE))
 
 
+@app.route("/crossref_issns.csv.gz", methods=["GET"])
+def get_crossref_issns():
+    return get_s3_csv_gz(journal_export.get_journal_file_key(journal_export.ISSNS_FILE))
+
+
 @app.route("/feed/changefiles", methods=["GET"])
 def get_changefiles():
     # api key is optional here, is just sends back urls that populate with it
@@ -746,7 +833,7 @@ def get_changefile_filename(filename):
     if api_key not in valid_changefile_api_keys():
         abort_json(403, "Invalid api_key")
 
-    key = get_file_from_bucket(filename, api_key)
+    key = get_file_from_bucket(filename)
 
     def generate_changefile():
         for chunk in key:
@@ -790,7 +877,7 @@ def get_daily_changefile_filename(filename):
     if api_key not in valid_changefile_api_keys():
         abort_json(403, "Invalid api_key")
 
-    key = get_file_from_bucket(filename, api_key, feed=DAILY_FEED)
+    key = get_file_from_bucket(filename, feed=DAILY_FEED)
 
     def generate_changefile():
         for chunk in key:
@@ -802,11 +889,17 @@ def get_daily_changefile_filename(filename):
     })
 
 
-@app.route("/issn_ls", methods=["GET"])
+@app.route("/issn_ls", methods=["GET", "POST"])
 def get_issnls():
-    issns = request.args.get('issns', '').split(',')
+    if request.method == 'GET':
+        issns = request.args.get('issns', '').split(',')
+    else:
+        if request.json and isinstance(request.json.get('issns', None), list):
+            issns = request.json.get('issns')
+        else:
+            abort_json(400, 'send a json object like {"issns": ["0005-0970","1804-6436"]}')
 
-    query = sql.text(u'select issn, issn_l from issn_to_issnl where issn = any(:issns)').bindparams(issns=issns)
+    query = sql.text('select issn, issn_l from journalsdb_issn_to_issn_l where issn = any(:issns)').bindparams(issns=issns)
 
     issn_l_list = db.engine.execute(query).fetchall()
     issn_l_map = dict([(issn_pair[0], issn_pair[1]) for issn_pair in issn_l_list])
@@ -816,10 +909,11 @@ def get_issnls():
     return jsonify(response)
 
 
-@app.route("/v2/search/", methods=["GET"])
+@app.route("/v2/search/", methods=["GET"], strict_slashes=False)
 def get_search_query():
     query = request.args.get("query", None)
     is_oa = request.args.get("is_oa", None)
+    page = request.args.get("page", None)
 
     if is_oa is not None:
         try:
@@ -830,20 +924,30 @@ def get_search_query():
             else:
                 abort_json(400, "is_oa must be 'true' or 'false'")
 
+    if page is not None:
+        try:
+            page = int(page)
+            if page < 1:
+                raise ValueError
+        except ValueError:
+            abort_json(400, "'page' must be a positive integer")
+    else:
+        page = 1
+
     if not query:
         abort_json(400, "query parameter is required")
 
     start_time = time()
-    response = fulltext_search_title(query, is_oa)
+    response = fulltext_search_title(query, is_oa, page=page)
     sorted_response = sorted(response, key=lambda k: k['score'], reverse=True)
 
     for api_response in sorted_response:
         doi = api_response['response']['doi']
-        version_suffix = re.findall(ur'[./](v\d+)$', doi, re.IGNORECASE)
+        version_suffix = re.findall(r'[./](v\d+)$', doi, re.IGNORECASE)
 
         if version_suffix:
             title = api_response['response']['title']
-            title = u'{} ({})'.format(title, version_suffix[0].upper())
+            title = '{} ({})'.format(title, version_suffix[0].upper())
             api_response['response']['title'] = title
 
     elapsed_time = elapsed(start_time, 3)
@@ -859,9 +963,9 @@ def get_search_autocomplete_query(query):
 
 @app.route("/admin/restart/<api_key>", methods=["GET"])
 def restart_endpoint(api_key):
-    print "in restart endpoint"
+    print("in restart endpoint")
     if api_key != os.getenv("HEROKU_API_KEY"):
-        print u"not allowed to reboot in restart_endpoint"
+        print("not allowed to reboot in restart_endpoint")
         return jsonify({
             "response": "not allowed to reboot, didn't send right heroku api key"
         })
@@ -873,29 +977,11 @@ def restart_endpoint(api_key):
         "response": "restarted dynos: {}".format(dyno_prefix)
     })
 
-@app.route("/admin/accuracy", methods=["GET"])
-def accuracy_report():
-    reports = []
-    subset_q = "select distinct input_batch_name from accuracy_from_mturk"
-    subsets = get_sql_answers(db, subset_q)
-    # subsets = ["articlelike_all_years"]
-
-    for subset in subsets:
-        reports.append(AccuracyReport(test_set=subset, no_rg_or_academia=True))
-        reports.append(AccuracyReport(test_set=subset, genre='journal-article', no_rg_or_academia=True))
-        reports.append(AccuracyReport(test_set=subset, since_2017=True, no_rg_or_academia=True))
-        reports.append(AccuracyReport(test_set=subset, before_2008=True, no_rg_or_academia=True))
-
-    for report in reports:
-        report.build_current_report()
-
-    return jsonify({"response": [report.to_dict() for report in reports]})
-
 
 @app.route('/admin/report-error/<api_key>', methods=['GET', 'POST'])
 def report_error(api_key):
     if api_key != os.getenv("HEROKU_API_KEY"):
-        error = u'wrong heroku API key {} in /admin/report-error/'.format(api_key)
+        error = 'wrong heroku API key {} in /admin/report-error/'.format(api_key)
         logger.error(error)
         return make_response(error, 403)
 
@@ -906,23 +992,76 @@ def report_error(api_key):
     })
 
 
+@app.route("/pmh_record_xml/<path:pmh_record_id>", methods=["GET"])
+def get_pmh_record_xml(pmh_record_id):
+    record = PmhRecord.query.get(pmh_record_id)
+
+    if not record or not record.api_raw:
+        return Response('', mimetype='text/xml', status=404)
+    else:
+        return Response(record.api_raw, mimetype='text/xml')
+
+
+@app.route("/crossref_api_cache/<path:doi>", methods=["GET"])
+def get_crossref_api_json(doi):
+    my_pub = pub.Pub.query.get(normalize_doi(doi))
+
+    if not my_pub or not my_pub.crossref_api_raw_new:
+        abort_json(404, f"Can't find a crossref API record for {doi}")
+    else:
+        return jsonify(my_pub.crossref_api_raw_new)
+
+
+@app.route("/pubmed_xml/<pmid>", methods=["GET"])
+def get_pubmed_xml(pmid):
+    pubmed_raw = PubmedRaw.query.get(pmid)
+
+    if not pubmed_raw or not pubmed_raw.pubmed_article_xml:
+        abort_json(404, f"Can't find a PubMed record for PMID {pmid}")
+    else:
+        return Response(pubmed_raw.pubmed_article_xml, mimetype='text/xml')
+
+
+@app.route("/doi_page/<path:doi>", methods=["GET"])
+def get_doi_landing_page(doi):
+    doi_key = quote(normalize_doi(doi), safe='')
+
+    s3 = boto.connect_s3()
+    bucket = s3.get_bucket(pub.LANDING_PAGE_ARCHIVE_BUCKET)
+    key = bucket.lookup(doi_key)
+
+    if not key:
+        abort_json(404, f"Can't find a landing page archive for {doi}")
+
+    def generate_file():
+        for chunk in key:
+            yield chunk
+
+    return Response(generate_file(), content_type="gzip", headers={
+        'Content-Length': key.size,
+        'Content-Disposition': 'attachment; filename="{}.gz"'.format(key.name),
+    })
+
+
+@app.route("/repo_page/<page_id>", methods=["GET"])
+def get_repository_page(page_id):
+    if repo_page := PageNew.query.get(page_id):
+        if repo_page.landing_page_archive_key:
+            s3 = boto.connect_s3()
+            bucket = s3.get_bucket(REPO_PAGE_ARCHIVE_BUCKET)
+            if key := bucket.lookup(repo_page.landing_page_archive_key.key):
+                def generate_file():
+                    for chunk in key:
+                        yield chunk
+
+                return Response(generate_file(), content_type="gzip", headers={
+                    'Content-Length': key.size,
+                    'Content-Disposition': 'attachment; filename="{}"'.format(key.name),
+                })
+
+    abort_json(404, f"Can't find an archive for repo page {page_id}")
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, debug=True, threaded=True)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

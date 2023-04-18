@@ -100,7 +100,13 @@ class PmhRecordMaker(RecordMaker):
         record.work_pdf_archive_url = best_page.fulltext_pdf_archive_url()
         record.is_work_pdf_url_free_to_read = True if best_page.scrape_pdf_url else None
 
+        record.is_oa = bool(best_page.is_open)
+        record.open_license = best_page.scrape_license
+        record.open_version = best_page.scrape_version
+
         cls._make_source_specific_record_changes(record, pmh_record, best_page)
+
+        record.flag_modified_jsonb()
 
         if db.session.is_modified(record):
             record.updated = datetime.datetime.utcnow().isoformat()
@@ -108,8 +114,6 @@ class PmhRecordMaker(RecordMaker):
         if not record.published_date:
             logger.info(f'no published date determined for {pmh_record} so not making a record')
             return None
-
-        record.flag_modified_jsonb()
 
         return record
 

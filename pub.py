@@ -36,7 +36,8 @@ from pmh_record import title_is_too_short
 from recordthresher.record_maker import CrossrefRecordMaker
 from reported_noncompliant_copies import reported_noncompliant_url_fragments
 from util import NoDoiException
-from util import is_pmc, clamp, clean_doi, fix_url_scheme, normalize_doi
+from util import is_pmc, clamp, clean_doi, normalize_doi
+from convert_http_to_https import fix_url_scheme
 from util import normalize
 from util import normalize_title
 from util import safe_commit
@@ -191,12 +192,12 @@ def get_pubs_from_biblio(biblios, run_with_hybrid=False):
     return returned_pubs
 
 
-def get_pub_from_biblio(biblio, run_with_hybrid=False, skip_all_hybrid=False):
+def get_pub_from_biblio(biblio, run_with_hybrid=False, skip_all_hybrid=False, recalculate=True):
     my_pub = lookup_product(**biblio)
     if run_with_hybrid:
         my_pub.run_with_hybrid()
         safe_commit(db)
-    else:
+    elif recalculate:
         my_pub.recalculate()
     return my_pub
 
@@ -590,22 +591,32 @@ class Pub(db.Model):
     @property
     def is_paratext(self):
         paratext_exprs = [
+            r'^Author Guidelines$',
             r'^Author Index$'
             r'^Back Cover',
+            r'^Back Matter',
             r'^Contents$',
             r'^Contents:',
             r'^Cover Image',
             r'^Cover Picture',
             r'^Editorial Board',
+            r'Editor Report$',
             r'^Front Cover',
             r'^Frontispiece',
+            r'^Graphical Contents List$',
+            r'^Index$',
             r'^Inside Back Cover',
             r'^Inside Cover',
             r'^Inside Front Cover',
             r'^Issue Information',
             r'^List of contents',
+            r'^List of Tables$',
+            r'^List of Figures$',
+            r'^List of Plates$',
             r'^Masthead',
+            r'^Pages de début$',
             r'^Title page',
+            r"^Editor's Preface",
         ]
 
         for expr in paratext_exprs:
@@ -1269,6 +1280,8 @@ class Pub(db.Model):
         return self.scrape_evidence and self.scrape_evidence != "closed"
 
     def ask_hybrid_scrape(self):
+        return_location = None
+
         if self.has_stored_hybrid_scrape:
             my_location = OpenLocation()
             my_location.pdf_url = self.scrape_pdf_url
@@ -1294,8 +1307,12 @@ class Pub(db.Model):
                     self.embargoed_locations.append(my_location)
                 else:
                     self.open_locations.append(my_location)
+                    return_location = my_location
             else:
                 self.open_locations.append(my_location)
+                return_location = my_location
+
+        return return_location
 
     @property
     def page_matches_by_doi_filtered(self):

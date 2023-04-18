@@ -72,6 +72,7 @@ class CrossrefRecordMaker(RecordMaker):
             for ref in pub_crossref_api_raw.get('reference', [])
         ]
         record.set_jsonb('citations', citations)
+        record.set_jsonb('funders', pub.crossref_api_modified.get('funder', []))
 
         record.record_webpage_url = pub.url
         record.set_jsonb('journal_issns', pub.issns)
@@ -86,8 +87,8 @@ class CrossrefRecordMaker(RecordMaker):
             if doi_repo_page:
                 record.repository_id = doi_repo_page.endpoint_id
 
-        record.journal_id = pub.openalex_journal_id
-        record.venue_name = pub.journal
+        # record.journal_id = pub.openalex_journal_id
+        record.venue_name = pub.journal or pub.crossref_api_raw.get('event', {}).get('name')
         record.publisher = pub.publisher
         record.is_retracted = pub.is_retracted
 
@@ -131,12 +132,21 @@ class CrossrefRecordMaker(RecordMaker):
             record.work_pdf_url = None
             record.is_work_pdf_url_free_to_read = None
 
+        if (local_lookup := pub.ask_local_lookup()) and not local_lookup['is_future']:
+            record.open_license = local_lookup['location'].license
+            record.open_version = local_lookup['location'].version
+            record.is_oa = True
+        elif hybrid_scrape := pub.ask_hybrid_scrape():
+            record.open_license = hybrid_scrape.license
+            record.open_version = hybrid_scrape.version
+            record.is_oa = True
+
         cls._make_source_specific_record_changes(record, pub)
+
+        record.flag_modified_jsonb()
 
         if db.session.is_modified(record):
             record.updated = datetime.datetime.utcnow().isoformat()
-
-        record.flag_modified_jsonb()
 
         return record
 
@@ -173,7 +183,7 @@ class CrossrefRecordMaker(RecordMaker):
                 if best_match_idx > -1:
                     crossref_author['is_corresponding'] = pl_authors[best_match_idx].get('is_corresponding', '')
                     if cls._should_merge_affiliations(record, pub):
-                        crossref_author['affiliation'] = pl_authors[best_match_idx].get('affiliation', [])
+                        crossref_author['affiliation'] = pl_authors[best_match_idx].get('affiliation', []) or crossref_author.get('affiliation', [])
 
                 record.set_authors(record.authors)
 
@@ -181,8 +191,7 @@ class CrossrefRecordMaker(RecordMaker):
 
     @classmethod
     def _make_source_specific_record_changes(cls, record, pub):
-        if pub.scrape_updated and pub.scrape_updated > datetime.datetime(2022, 1, 1):
-            cls._merge_parseland_parse(record, pub)
+        cls._merge_parseland_parse(record, pub)
 
     @classmethod
     def _should_merge_affiliations(cls, record, pub):
@@ -200,7 +209,7 @@ class CrossrefRecordMaker(RecordMaker):
                     and re.search(f['filter_value'], pub.doi)
                 )
             ):
-                if f['replace_crossref'] or not any(author.get('affiliation') for author in record.authors):
+                if f['replace_crossref'] or any(not author.get('affiliation') for author in record.authors):
                     return True
 
         return False
